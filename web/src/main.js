@@ -6,6 +6,7 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 import { Heightfield } from './heightfield.js';
+import { buildColliders } from './colliders.js';
 import { createTerrain } from './terrain.js';
 import { createWater } from './water.js';
 import { createTrees, createRocks, Berries } from './props.js';
@@ -159,7 +160,15 @@ async function boot() {
   hud.progress(0.95, 'almost there');
   await settle();
 
+  // Radii are a little tighter than the visible canopy: brushing leaves should
+  // not stop you, only the trunk and the body of a rock should.
+  const colliders = buildColliders(manifest.worldSize, [
+    { data: trees, stride: manifest.instanceStride, radiusOf: (s) => 0.34 * s },
+    { data: rocks, stride: manifest.instanceStride, radiusOf: (s) => 0.80 * s },
+  ]);
+
   const player = new Player(gltf, field);
+  player.colliders = colliders;
   // The face is painted rather than modelled. Vertex colours carry the body as
   // multipliers against the skin, and this supplies the absolute colour, so the
   // two multiply together into the finished character.
@@ -338,7 +347,7 @@ async function boot() {
 
   // Handle for automated capture and for poking at the scene from the console.
   window.__app = {
-    THREE, scene, camera, renderer, player, rig, sky, field, berries, grass, audio, manifest, quality,
+    THREE, scene, camera, renderer, player, rig, sky, field, berries, grass, audio, manifest, quality, colliders,
     // Lets automated capture wait on rendered frames instead of wall-clock time,
     // which matters a lot when software rendering runs at a couple of fps.
     frameIndex: () => frameIndex,

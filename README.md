@@ -139,6 +139,7 @@ app, the baked assets, and three.js out of `node_modules`.
 | `web/src/water.js` | Depth baked per vertex; quads entirely above the waterline are dropped. |
 | `web/src/grass.js` | A finite patch that re-seeds when the player leaves its cell. Wind is applied in the vertex shader in world space — blades carry a random yaw, so the shader recovers it from the instance matrix to stop every blade blowing a different way. |
 | `web/src/player.js` | Controller and animation state machine. Clip choice and playback rate both come from ground speed, which is what keeps the feet from skating. |
+| `web/src/colliders.js` | Scenery collision. Each prop contributes a circle in the XZ plane, bucketed into a uniform grid; the character is pushed out of every overlap in one pass, and only the velocity component heading into an obstacle is cancelled, so you slide around a trunk rather than sticking to it. |
 | `web/src/audio.js` | Every sound is synthesised — filtered noise for footfalls, enveloped oscillators for jumps and chimes. Consecutive pickups climb a pentatonic scale. |
 | `web/src/props.js`, `effects.js`, `camera.js`, `input.js`, `hud.js` | Instanced scenery, pooled particles, follow/free cameras, unified keyboard+touch input, HUD. |
 
@@ -181,7 +182,6 @@ day. Two things worth knowing if you run it:
 
 - No level of detail. Trees and terrain draw at full resolution regardless of
   distance; fine at this world size, not at ten times it.
-- Collision is heightfield-only. Nothing stops you walking through a tree.
 - Deep water is a wall rather than a swim state.
 - Mouse-look assumes a pointer. There is no touch input.
 

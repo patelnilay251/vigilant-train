@@ -191,6 +191,28 @@ function shape(x, y, z) {
   return smin(d, tailField(x, y, z), 0.035);
 }
 
+/**
+ * Ambient occlusion sampled straight from the distance field.
+ *
+ * Marching outwards along the normal and comparing how far the field says the
+ * surface is against how far we actually walked measures how enclosed a point
+ * is: in the open the two agree, and in a crevice the field stays small. Costs
+ * five field evaluations per vertex and gives the model contact shading that no
+ * amount of lighting tuning can, because the geometry causing it is millimetres
+ * across — under the chin, inside the ears, where the tail meets the rump.
+ */
+function ambientOcclusion(x, y, z, nx, ny, nz) {
+  let occlusion = 0;
+  let weight = 1;
+  for (let i = 0; i < 5; i++) {
+    const h = 0.012 + 0.105 * (i / 4);
+    const d = shape(x + nx * h, y + ny * h, z + nz * h);
+    occlusion += (h - d) * weight;
+    weight *= 0.92;
+  }
+  return clamp(1 - 2.4 * occlusion, 0, 1);
+}
+
 // ---------------------------------------------------------------------------
 // Region classifier: which colour a point on the surface takes.
 // ---------------------------------------------------------------------------
@@ -531,7 +553,13 @@ function main() {
     mesh.positions.push(x, y, z);
     mesh.normals.push(surface.normals[i], surface.normals[i + 1], surface.normals[i + 2]);
     const c = surfaceColor(x, y, z);
-    mesh.colors.push(c[0], c[1], c[2]);
+    // Floored well above zero: this is contact shading, not a lighting solution,
+    // and driving crevices to black reads as dirt.
+    const shade = 0.54 + 0.46 * ambientOcclusion(
+      x, y, z,
+      surface.normals[i], surface.normals[i + 1], surface.normals[i + 2],
+    );
+    mesh.colors.push(c[0] * shade, c[1] * shade, c[2] * shade);
     // Anything off the face — back of the head, ears, body, tail — is sent to a
     // corner of the texture that is plain skin, so one material covers the
     // whole character.

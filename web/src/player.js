@@ -17,6 +17,8 @@ const AIR_DRAG = 1.4;
 const GRAVITY = -23;
 const JUMP_VELOCITY = 7.4;
 const TURN_RATE = 13;
+// Half-width of the character, used against scenery colliders.
+const BODY_RADIUS = 0.24;
 
 // Platformer feel, in seconds.
 //
@@ -80,6 +82,8 @@ export class Player {
     this._normal = { x: 0, y: 1, z: 0 };
 
     this.onFootstep = null;
+    /** Set by the caller; scenery to be pushed out of. @type {?import('./colliders.js').ColliderField} */
+    this.colliders = null;
     this._footPhase = 0;
     this._coyote = 0;
     this._buffer = 0;
@@ -181,6 +185,27 @@ export class Player {
       this.position.z = nextZ;
     } else {
       this.velocity.z = 0;
+    }
+
+    // ---- push out of scenery
+    //
+    // Done after the axis-separated slide against water and the world edge, so
+    // a prop standing in shallow water cannot shove the character into a place
+    // the water test already rejected.
+    if (this.colliders) {
+      const pushed = this.colliders.resolve(this.position.x, this.position.z, BODY_RADIUS);
+      if (pushed.hit && !this.blocked(pushed.x, pushed.z)) {
+        this.position.x = pushed.x;
+        this.position.z = pushed.z;
+        // Cancel only the component of velocity heading into the obstacle;
+        // whatever runs along it survives, so the character slides around a
+        // trunk instead of sticking to it.
+        const into = this.velocity.x * pushed.nx + this.velocity.z * pushed.nz;
+        if (into < 0) {
+          this.velocity.x -= pushed.nx * into;
+          this.velocity.z -= pushed.nz * into;
+        }
+      }
     }
 
     // ---- vertical
