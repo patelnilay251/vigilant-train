@@ -14,7 +14,8 @@ import { fileURLToPath } from 'node:url';
 import { GLTFBuilder } from './lib/glb.mjs';
 import { surfaceNets } from './lib/surfacenets.mjs';
 import {
-  smin, sdSphere, sdEllipsoid, sdRoundCone, distanceToSegment, clamp, smoothstep,
+  smin, sdSphere, sdEllipsoid, sdRoundCone, sdSegmentBox2D, extrudeX,
+  distanceToSegment, clamp, smoothstep,
 } from './lib/sdf.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -44,32 +45,51 @@ const srgbToLinear = (c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) **
 // ---------------------------------------------------------------------------
 
 const ANATOMY = {
-  torsoLower: { c: [0, 0.235, 0.0], r: 0.228 },
-  torsoUpper: { c: [0, 0.395, 0.012], r: 0.192 },
-  head: { c: [0, 0.625, 0.022], r: [0.278, 0.252, 0.250] },
-  cheek: { c: [0.152, 0.574, 0.162], r: 0.095 },
+  // Torso is a cone that widens to the hips, not a stack of equal spheres. The
+  // reference silhouette is a teardrop: narrow shoulders, broad bottom.
+  torsoHips: { c: [0, 0.215, 0.000], r: 0.238 },
+  torsoMid: { c: [0, 0.400, 0.008], r: 0.192 },
+  torsoTop: { c: [0, 0.520, 0.014], r: 0.152 },
+  head: { c: [0, 0.660, 0.020], r: [0.246, 0.226, 0.230] },
+  cheek: { c: [0.140, 0.598, 0.150], r: 0.092 },
+  // Long, thin and blade-like. The previous ears were nearly twice this thick
+  // and read as horns.
   ear: {
-    root: [0.112, 0.800, -0.015],
-    mid: [0.205, 0.985, -0.080],
-    tip: [0.292, 1.170, -0.150],
-    rRoot: 0.092, rMid: 0.064, rTip: 0.023,
+    root: [0.098, 0.792, -0.010],
+    mid: [0.183, 1.002, -0.062],
+    tip: [0.258, 1.212, -0.118],
+    rRoot: 0.070, rMid: 0.042, rTip: 0.014,
   },
-  arm: { shoulder: [0.172, 0.425, 0.012], hand: [0.238, 0.292, 0.048], rTop: 0.068, rEnd: 0.060 },
-  leg: { hip: [0.104, 0.185, 0.0], ankle: [0.128, 0.046, 0.005], rTop: 0.100, rEnd: 0.084 },
-  foot: { c: [0.132, 0.042, 0.052], r: [0.086, 0.044, 0.118] },
+  arm: { shoulder: [0.150, 0.432, 0.010], hand: [0.216, 0.312, 0.042], rTop: 0.062, rEnd: 0.053 },
+  leg: { hip: [0.096, 0.172, 0.0], ankle: [0.116, 0.042, 0.005], rTop: 0.092, rEnd: 0.078 },
+  foot: { c: [0.120, 0.038, 0.048], r: [0.080, 0.040, 0.112] },
   // Three toes per foot, splayed across the front of the pad.
-  toes: { z: 0.140, y: 0.038, spread: 0.046, r: 0.031 },
-  fingers: { spread: 0.030, r: 0.024 },
+  toes: { z: 0.132, y: 0.034, spread: 0.043, r: 0.029 },
+  fingers: { spread: 0.028, r: 0.022 },
+  /**
+   * The tail is a flat plate whose outline is a thick zigzag polyline. Built
+   * from square-cornered 2D boxes rather than round cones: the reference bolt
+   * has straight edges and sharp reversals, and capsules cannot produce either.
+   * Reaches above the crown of the head, as it does in the reference.
+   */
   tail: {
-    pts: [
-      [0, 0.24, -0.17],
-      [0, 0.17, -0.34],
-      [0, 0.42, -0.27],
-      [0, 0.34, -0.52],
-      [0, 0.76, -0.38],
+    // Widths are generous relative to the zigzag amplitude on purpose: too thin
+    // and consecutive segments stop overlapping, leaving a hole punched through
+    // the middle of the plate where the ribbon folds back on itself.
+    spine: [
+      [-0.150, 0.238],
+      [-0.318, 0.296],
+      [-0.222, 0.438],
+      [-0.398, 0.566],
+      [-0.252, 0.880],
     ],
-    radii: [0.038, 0.062, 0.085, 0.100, 0.130],
-    flatten: 3.0,
+    widths: [0.038, 0.084, 0.100, 0.114, 0.128],
+    halfThickness: 0.044,
+    cornerRadius: 0.012,
+    // Swung off the centre line, as the reference pose has it. Dead-centre the
+    // plate is edge-on from the front and its tip reads as an antenna above the
+    // head rather than as a tail behind the body.
+    yaw: 0.26,
   },
 };
 
@@ -80,33 +100,47 @@ const MIRROR = [1, -1];
 // ---------------------------------------------------------------------------
 
 function tailField(x, y, z) {
-  const { pts, radii, flatten } = ANATOMY.tail;
-  // Evaluating in a space stretched along X yields a shape thin along X.
-  // Dividing the result by the stretch keeps the field a conservative distance
-  // bound, which is what the mesher's Newton step relies on.
-  const fx = x * flatten;
-  let d = Infinity;
-  for (let i = 0; i < pts.length - 1; i++) {
-    const a = pts[i];
-    const b = pts[i + 1];
-    const seg = sdRoundCone(fx, y, z, a[0], a[1], a[2], b[0], b[1], b[2], radii[i], radii[i + 1]);
-    // Hard union, not smin: the creases between segments are the whole point.
-    // Smoothing them turns a lightning bolt into a paddle.
-    d = Math.min(d, seg);
+  const { spine, widths, halfThickness, cornerRadius, yaw } = ANATOMY.tail;
+
+  // Rotate into the tail's own frame about Y, so the plate can sit at an angle
+  // to the body without the outline maths having to know about it.
+  const c = Math.cos(yaw);
+  const s = Math.sin(yaw);
+  const rx = c * x - s * z;
+  const rz = s * x + c * z;
+  x = rx;
+  z = rz;
+
+  // Silhouette first, in the ZY plane.
+  let outline = Infinity;
+  for (let i = 0; i < spine.length - 1; i++) {
+    const [az, ay] = spine[i];
+    const [bz, by] = spine[i + 1];
+    // Each box carries the wider of its two endpoint widths; overlapping
+    // rectangles at each joint are what produce the bolt's sharp reversals.
+    const w = Math.max(widths[i], widths[i + 1]);
+    const box = sdSegmentBox2D(z, y, az, ay, bz, by, w);
+    // Hard union: smoothing these joints is what previously turned the
+    // lightning bolt into a featureless paddle.
+    outline = Math.min(outline, box);
   }
-  return d / flatten;
+
+  return extrudeX(outline, x, halfThickness, cornerRadius);
 }
 
 function shape(x, y, z) {
   const A = ANATOMY;
 
   let d = smin(
-    sdSphere(x, y, z, A.torsoLower.c[0], A.torsoLower.c[1], A.torsoLower.c[2], A.torsoLower.r),
-    sdSphere(x, y, z, A.torsoUpper.c[0], A.torsoUpper.c[1], A.torsoUpper.c[2], A.torsoUpper.r),
-    0.115,
+    sdSphere(x, y, z, A.torsoHips.c[0], A.torsoHips.c[1], A.torsoHips.c[2], A.torsoHips.r),
+    sdSphere(x, y, z, A.torsoMid.c[0], A.torsoMid.c[1], A.torsoMid.c[2], A.torsoMid.r),
+    0.13,
   );
+  d = smin(d, sdSphere(x, y, z, A.torsoTop.c[0], A.torsoTop.c[1], A.torsoTop.c[2], A.torsoTop.r), 0.11);
 
-  d = smin(d, sdEllipsoid(x, y, z, A.head.c[0], A.head.c[1], A.head.c[2], A.head.r[0], A.head.r[1], A.head.r[2]), 0.06);
+  // A tighter blend here leaves the shallow neck pinch the reference has,
+  // rather than fusing head and body into one ovoid.
+  d = smin(d, sdEllipsoid(x, y, z, A.head.c[0], A.head.c[1], A.head.c[2], A.head.r[0], A.head.r[1], A.head.r[2]), 0.05);
 
   for (const s of MIRROR) {
     d = smin(d, sdSphere(x, y, z, s * A.cheek.c[0], A.cheek.c[1], A.cheek.c[2], A.cheek.r), 0.055);
@@ -169,18 +203,26 @@ function surfaceColor(x, y, z) {
     if (distance < 0.12 && t > 0.64) return EAR_TIP;
   }
 
-  const t0 = A.tail.pts[0];
-  const t1 = A.tail.pts[1];
-  if (z < -0.15) {
-    const { distance } = distanceToSegment(x, y, z, t0[0], t0[1], t0[2], t1[0], t1[1], t1[2]);
-    if (distance < 0.10) return BROWN;
+  // Decide tail membership up front. A depth bound alone is not enough to keep
+  // the back stripes off it: the tail folds forward through the same band of z
+  // that the torso's back occupies, so the two regions genuinely overlap and
+  // have to be separated by the tail field itself.
+  const onTail = tailField(x, y, z) < 0.006;
+
+  if (onTail) {
+    const [az, ay] = A.tail.spine[0];
+    const [bz, by] = A.tail.spine[1];
+    // Into the tail's yawed frame, exactly as tailField does, or the stalk test
+    // is measured against the wrong axis.
+    const tz = Math.sin(A.tail.yaw) * x + Math.cos(A.tail.yaw) * z;
+    // Brown only on the short stalk where the tail leaves the body.
+    if (sdSegmentBox2D(tz, y, az, ay, bz, by, A.tail.widths[0] + 0.014) < 0.0) return BROWN;
+    return YELLOW;
   }
 
-  // Two bands across the back of the torso only. The far bound matters: the
-  // torso's back surface sits near z = -0.23, and without it the bands also
-  // paint themselves across the tail, which passes through the same height.
-  if (z < -0.04 && z > -0.25 && Math.abs(x) < 0.20) {
-    if ((y > 0.330 && y < 0.398) || (y > 0.444 && y < 0.506)) return BROWN;
+  // Two bands across the back of the torso.
+  if (z < -0.04 && z > -0.26 && Math.abs(x) < 0.20) {
+    if ((y > 0.315 && y < 0.383) || (y > 0.429 && y < 0.491)) return BROWN;
   }
 
   return YELLOW;
@@ -194,14 +236,18 @@ function surfaceColor(x, y, z) {
 function buildSkeleton() {
   const A = ANATOMY;
   const { ear, arm, leg } = A;
-  const tail = A.tail.pts;
+  // Spine points are stored as [z, y] for the 2D outline; the rig needs xyz, in
+  // world space, which means undoing the yaw the field applies to its input.
+  const tailC = Math.cos(A.tail.yaw);
+  const tailS = Math.sin(A.tail.yaw);
+  const tail = A.tail.spine.map(([z, y]) => [tailS * z, y, tailC * z]);
 
   const bones = [
     { name: 'root', parent: -1, pos: [0, 0, 0] },
-    { name: 'hips', parent: 0, pos: [0, 0.230, -0.01], seg: [[0, 0.190, -0.01], [0, 0.330, 0]], r: 0.190 },
-    { name: 'spine', parent: 1, pos: [0, 0.385, 0.005], seg: [[0, 0.330, 0], [0, 0.450, 0.008]], r: 0.170 },
-    { name: 'chest', parent: 2, pos: [0, 0.480, 0.010], seg: [[0, 0.450, 0.008], [0, 0.555, 0.014]], r: 0.170 },
-    { name: 'head', parent: 3, pos: [0, 0.585, 0.016], seg: [[0, 0.575, 0.016], [0, 0.760, 0.022]], r: 0.230 },
+    { name: 'hips', parent: 0, pos: [0, 0.215, -0.01], seg: [[0, 0.170, -0.01], [0, 0.310, 0]], r: 0.195 },
+    { name: 'spine', parent: 1, pos: [0, 0.375, 0.005], seg: [[0, 0.310, 0], [0, 0.440, 0.008]], r: 0.170 },
+    { name: 'chest', parent: 2, pos: [0, 0.500, 0.012], seg: [[0, 0.440, 0.008], [0, 0.575, 0.016]], r: 0.160 },
+    { name: 'head', parent: 3, pos: [0, 0.610, 0.018], seg: [[0, 0.600, 0.018], [0, 0.800, 0.022]], r: 0.225 },
   ];
 
   const index = (name) => bones.findIndex((b) => b.name === name);
@@ -244,8 +290,8 @@ function buildSkeleton() {
 
   // The tail bones sit close enough to the lower back that a pure distance
   // falloff would drag the body with them; the mask fades them in behind it.
-  const tailMask = (x, y, z) => smoothstep(-0.185, -0.31, z);
-  const tailRadii = [0.075, 0.1, 0.115, 0.14];
+  const tailMask = (x, y, z) => smoothstep(-0.165, -0.29, z);
+  const tailRadii = [0.075, 0.100, 0.120, 0.150];
   for (let i = 0; i < 4; i++) {
     bones.push({
       name: `tail${i + 1}`,
@@ -388,21 +434,42 @@ function addOrientedEllipsoid(mesh, center, radii, normal, color, joint, opts = 
 function headSurface(dir, sideSign = 1) {
   const { c, r } = ANATOMY.head;
   const u = normalize([dir[0] * sideSign, dir[1], dir[2]]);
-  const point = [c[0] + r[0] * u[0], c[1] + r[1] * u[1], c[2] + r[2] * u[2]];
+  const guess = [c[0] + r[0] * u[0], c[1] + r[1] * u[1], c[2] + r[2] * u[2]];
   const normal = normalize([u[0] / r[0], u[1] / r[1], u[2] / r[2]]);
-  return { point, normal };
+  return { point: projectToSurface(guess, normal), normal };
 }
 
 const offsetAlong = (p, n, d) => [p[0] + n[0] * d, p[1] + n[1] * d, p[2] + n[2] * d];
+
+/**
+ * Walks a point onto the real isosurface along `normal`.
+ *
+ * headSurface() solves against the bare head ellipsoid, but the shape the
+ * mesher sees also has the cheek masses blended into it, so the true surface
+ * sits measurably further out around the jaw. Placing face features against the
+ * ellipsoid buries them; this puts them where the skin actually is.
+ */
+function projectToSurface(point, normal, iterations = 12) {
+  let [px, py, pz] = point;
+  for (let i = 0; i < iterations; i++) {
+    const d = shape(px, py, pz);
+    if (!Number.isFinite(d) || Math.abs(d) < 1e-5) break;
+    px -= normal[0] * d;
+    py -= normal[1] * d;
+    pz -= normal[2] * d;
+  }
+  return [px, py, pz];
+}
 
 function addFace(mesh) {
   const head = BONE_INDEX.head;
 
   for (const s of MIRROR) {
     // Eye: a large dark dome, set slightly into the skull.
-    const eye = headSurface([0.430, 0.150, 0.890], s);
+    // Large, and slightly taller than wide, as in the reference.
+    const eye = headSurface([0.428, 0.180, 0.886], s);
     const eyeCenter = offsetAlong(eye.point, eye.normal, -0.030);
-    addOrientedEllipsoid(mesh, eyeCenter, [0.064, 0.068, 0.062], eye.normal, DARK, head);
+    addOrientedEllipsoid(mesh, eyeCenter, [0.070, 0.080, 0.066], eye.normal, DARK, head);
 
     // Highlight, up and towards the nose, as on the reference model.
     const [bx, by] = orthonormalBasis(eye.normal);
@@ -415,9 +482,12 @@ function addFace(mesh) {
 
     // Cheek pouch: a large flat red disc lying on the skull. Angled forward
     // rather than straight out to the side, or it falls off the silhouette.
-    const cheek = headSurface([0.660, -0.255, 0.706], s);
-    const cheekCenter = offsetAlong(cheek.point, cheek.normal, 0.004);
-    addOrientedEllipsoid(mesh, cheekCenter, [0.090, 0.090, 0.030], cheek.normal, RED, head);
+    // A shallow dome, not a flat disc. On a head this curved a flat disc buries
+    // its own edge in the skull and only its rim surfaces, which reads as a red
+    // crescent rather than a cheek pouch.
+    const cheek = headSurface([0.618, -0.330, 0.713], s);
+    const cheekCenter = offsetAlong(cheek.point, cheek.normal, -0.028);
+    addOrientedEllipsoid(mesh, cheekCenter, [0.086, 0.086, 0.043], cheek.normal, RED, head);
   }
 
   const nose = headSurface([0, 0.030, 1]);
@@ -426,12 +496,12 @@ function addFace(mesh) {
   // Mouth: open interior, tongue, and the two angled strokes of the upper lip
   // that give the character its signature expression.
   const mouth = headSurface([0, -0.360, 0.930]);
-  const mouthCenter = offsetAlong(mouth.point, mouth.normal, -0.014);
-  addOrientedEllipsoid(mesh, mouthCenter, [0.050, 0.032, 0.028], mouth.normal, DARK, head);
+  const mouthCenter = offsetAlong(mouth.point, mouth.normal, -0.016);
+  addOrientedEllipsoid(mesh, mouthCenter, [0.062, 0.046, 0.034], mouth.normal, DARK, head);
   addOrientedEllipsoid(
     mesh,
-    [mouthCenter[0], mouthCenter[1] - 0.012, mouthCenter[2] - mouth.normal[2] * 0.003],
-    [0.030, 0.015, 0.022], mouth.normal, TONGUE, head, { segments: 20, rings: 12 },
+    [mouthCenter[0], mouthCenter[1] - 0.018, mouthCenter[2] - mouth.normal[2] * 0.003],
+    [0.040, 0.021, 0.026], mouth.normal, TONGUE, head, { segments: 20, rings: 12 },
   );
 
   const [lipT, lipB] = orthonormalBasis(mouth.normal);

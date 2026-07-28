@@ -257,9 +257,9 @@ export class GrassField {
         const ao = 0.68 + 0.32 * field.aoAt(x, z);
         const tone = GrassField.jitter(gx, gz, 7);
         tmpColor.setRGB(
-          (0.30 + tone * 0.18) * ao,
-          (0.56 + tone * 0.24) * ao,
-          (0.18 + tone * 0.12) * ao,
+          (0.19 + tone * 0.12) * ao,
+          (0.37 + tone * 0.17) * ao,
+          (0.11 + tone * 0.07) * ao,
         );
         this.mesh.setColorAt(count, tmpColor);
         count++;

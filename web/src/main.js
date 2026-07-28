@@ -1,5 +1,9 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 import { Heightfield } from './heightfield.js';
 import { createTerrain } from './terrain.js';
@@ -93,7 +97,7 @@ async function boot() {
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = quality.lean ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.12;
+  renderer.toneMappingExposure = 0.95;
   document.body.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
@@ -131,6 +135,13 @@ async function boot() {
   scene.add(grass.group);
 
   const sky = new Sky(scene, manifest.worldSize, { shadowMapSize: quality.shadowMapSize });
+
+  // Rim light from behind and slightly above, opposite the sun. Costs one extra
+  // light and does most of the work of separating the character from the
+  // background, which is what stops it reading as pasted on.
+  const rim = new THREE.DirectionalLight('#cfe6ff', 0.7);
+  rim.castShadow = false;
+  scene.add(rim, rim.target);
 
   const particles = new Particles(quality.particles);
   scene.add(particles.points);
@@ -194,10 +205,37 @@ async function boot() {
 
   let collected = 0;
 
+  // ---- post-processing
+  //
+  // Skipped entirely on the lean tier: UnrealBloomPass runs five downsample and
+  // upsample passes, which is a real cost on a phone GPU for an effect that is
+  // meant to be subtle. Desktop also gets MSAA on the composer target, since
+  // the renderer's own antialiasing does not apply once we render offscreen.
+  let composer = null;
+  if (!quality.lean) {
+    const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+    const target = new THREE.WebGLRenderTarget(size.x, size.y, {
+      type: THREE.HalfFloatType,
+      samples: 4,
+    });
+    composer = new EffectComposer(renderer, target);
+    composer.addPass(new RenderPass(scene, camera));
+    composer.addPass(new UnrealBloomPass(
+      new THREE.Vector2(size.x, size.y),
+      0.22,  // strength — a lift on genuine highlights, not a glow filter
+      0.55,  // radius
+      1.02,  // threshold above white, so only HDR highlights bloom at all
+    ));
+    // Applies tone mapping and the output colour transform, which the composer
+    // otherwise bypasses.
+    composer.addPass(new OutputPass());
+  }
+
   const resize = () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
+    if (composer) composer.setSize(window.innerWidth, window.innerHeight);
   };
   window.addEventListener('resize', resize);
   window.addEventListener('orientationchange', () => setTimeout(resize, 120));
@@ -251,7 +289,18 @@ async function boot() {
       }
     }
 
-    renderer.render(scene, camera);
+    // Keep the rim light opposite the sun, aimed at whatever we are following.
+    rim.target.position.copy(focus);
+    rim.position.set(
+      focus.x - sky.sunDirection.x * 26,
+      focus.y + 14,
+      focus.z - sky.sunDirection.z * 26,
+    );
+    rim.target.updateMatrixWorld();
+    rim.intensity = 0.30 + Math.max(0, sky.sunDirection.y) * 0.55;
+
+    if (composer) composer.render(dt);
+    else renderer.render(scene, camera);
 
     hud.update(rawDt, {
       altitude: player.position.y,

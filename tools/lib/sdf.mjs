@@ -93,6 +93,44 @@ export function sdRoundBox(px, py, pz, cx, cy, cz, hx, hy, hz, r) {
   return length3(ox, oy, oz) + Math.min(Math.max(qx, Math.max(qy, qz)), 0) - r;
 }
 
+/**
+ * 2D oriented box: a rectangle whose centreline runs a -> b, with the given
+ * half-width. Straight edges and square corners, which is what distinguishes a
+ * lightning bolt from a chain of capsules.
+ */
+export function sdSegmentBox2D(px, py, ax, ay, bx, by, halfWidth) {
+  const ex = bx - ax;
+  const ey = by - ay;
+  const len = Math.hypot(ex, ey);
+  if (len < 1e-9) return Math.hypot(px - ax, py - ay) - halfWidth;
+
+  const dx = ex / len;
+  const dy = ey / len;
+
+  // Into the segment's own frame, centred on its midpoint.
+  const cx = px - (ax + bx) * 0.5;
+  const cy = py - (ay + by) * 0.5;
+  const qx = Math.abs(cx * dx + cy * dy) - len * 0.5;
+  const qy = Math.abs(-cx * dy + cy * dx) - halfWidth;
+
+  const ox = Math.max(qx, 0);
+  const oy = Math.max(qy, 0);
+  return Math.hypot(ox, oy) + Math.min(Math.max(qx, qy), 0);
+}
+
+/**
+ * Extrudes a 2D field along X into a slab of the given half-thickness, with
+ * corners rounded by `radius`. The 2D distance must be shrunk by the radius
+ * first so the rounding grows inwards rather than inflating the silhouette.
+ */
+export function extrudeX(distance2D, x, halfThickness, radius = 0) {
+  const wx = distance2D + radius;
+  const wy = Math.abs(x) - (halfThickness - radius);
+  const ox = Math.max(wx, 0);
+  const oy = Math.max(wy, 0);
+  return Math.min(Math.max(wx, wy), 0) + Math.hypot(ox, oy) - radius;
+}
+
 /** Numerical gradient of a scalar field; returns a unit vector. */
 export function gradient(field, x, y, z, eps = 1e-3) {
   const dx = field(x + eps, y, z) - field(x - eps, y, z);

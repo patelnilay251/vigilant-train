@@ -272,7 +272,7 @@ export class Sky {
     // The floor here stands in for moonlight and bounce; without it the world
     // is unreadable for a third of the cycle, and the foreground goes black the
     // moment the sun grazes the horizon.
-    this.ambient.intensity = 0.78 + Math.max(0, elevation) * 0.6;
+    this.ambient.intensity = 0.58 + Math.max(0, elevation) * 0.5;
 
     this.fog.color.copy(p.horizon).lerp(p.zenith, 0.22);
     this.fog.density = 0.0024 + 0.0020 * Math.max(0, 1 - Math.max(elevation, 0) * 3);

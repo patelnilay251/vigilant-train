@@ -17,6 +17,17 @@ const FILES = [
   'build/three.module.js',
   'examples/jsm/loaders/GLTFLoader.js',
   'examples/jsm/utils/BufferGeometryUtils.js',
+  // Post-processing chain, plus everything those passes reach for internally.
+  'examples/jsm/postprocessing/EffectComposer.js',
+  'examples/jsm/postprocessing/Pass.js',
+  'examples/jsm/postprocessing/RenderPass.js',
+  'examples/jsm/postprocessing/ShaderPass.js',
+  'examples/jsm/postprocessing/MaskPass.js',
+  'examples/jsm/postprocessing/UnrealBloomPass.js',
+  'examples/jsm/postprocessing/OutputPass.js',
+  'examples/jsm/shaders/CopyShader.js',
+  'examples/jsm/shaders/LuminosityHighPassShader.js',
+  'examples/jsm/shaders/OutputShader.js',
 ];
 
 let total = 0;
