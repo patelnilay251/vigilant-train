@@ -28,6 +28,8 @@ const SHOTS = [
   { name: '06-sunset', time: 0.757, at: [-20, -30], orbit: [PI * 0.5, 0.14, 8] },
   { name: '07-dusk', time: 0.790, at: [-20, -30], orbit: [PI * 0.5, 0.14, 8] },
   { name: '08-night', time: 0.980, at: [0, 0], orbit: [PI, 0.20, 6] },
+  // Looking up, to check the cloud layer.
+  { name: '12-sky', time: 0.31, at: [0, 0], fly: [0, 14, -14, Math.PI, 0.62] },
   // Character alone, no world, no HUD.
   { name: '09-model-front', time: 0.42, at: [0, 0], orbit: [0, 0.04, 1.9], solo: true, hud: false },
   { name: '10-model-side', time: 0.42, at: [0, 0], orbit: [PI * 0.5, 0.04, 1.9], solo: true, hud: false },
@@ -121,6 +123,34 @@ async function main() {
     const file = path.join(OUT, `${shot.name}.png`);
     await page.screenshot({ path: file });
     console.log(`[shoot] ${path.relative(process.cwd(), file)}`);
+  }
+
+  // ---- phone layout, in a touch-enabled context so the on-screen controls and
+  // the lean quality tier both actually engage.
+  const phone = await browser.newContext({
+    viewport: { width: 412, height: 892 },
+    deviceScaleFactor: 2,
+    isMobile: true,
+    hasTouch: true,
+  });
+  const phonePage = await phone.newPage();
+  phonePage.on('pageerror', (err) => problems.push(`[phone pageerror] ${err.message}`));
+  await phonePage.goto(URL_BASE, { waitUntil: 'domcontentloaded' });
+  try {
+    await phonePage.waitForFunction(() => window.__app !== undefined, { timeout: 120000 });
+    const tier = await phonePage.evaluate(() => ({
+      lean: window.__app.quality.lean,
+      touchClass: document.body.classList.contains('touch'),
+      stickVisible: getComputedStyle(document.getElementById('stick')).display !== 'none',
+    }));
+    console.log('[shoot] phone:', JSON.stringify(tier));
+
+    const from = await phonePage.evaluate(() => window.__app.frameIndex());
+    await phonePage.waitForFunction((f) => window.__app.frameIndex() >= f + 24, from, { timeout: 120000 });
+    await phonePage.screenshot({ path: path.join(OUT, '13-phone.png') });
+    console.log('[shoot] shots/13-phone.png');
+  } catch (e) {
+    console.error('[shoot] phone capture failed:', e.message);
   }
 
   const unique = [...new Set(problems)];

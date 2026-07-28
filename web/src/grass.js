@@ -16,7 +16,7 @@ const UP = new THREE.Vector3(0, 1, 0);
 
 // Roughly a quarter of the character's height. Anything taller reads as reeds
 // rather than turf, and at this density it would also swamp the silhouette.
-const BLADE_HEIGHT = 0.30;
+const BLADE_HEIGHT = 0.26;
 
 function buildBlade(segments = 4) {
   const positions = [];
@@ -27,15 +27,16 @@ function buildBlade(segments = 4) {
   for (let i = 0; i <= segments; i++) {
     const t = i / segments;
     const y = t * BLADE_HEIGHT;
-    const halfWidth = 0.032 * (1 - t * 0.93);
-    const curve = t * t * 0.055;
+    const halfWidth = 0.040 * (1 - t * 0.90);
+    const curve = t * t * 0.050;
     positions.push(-halfWidth, y, curve, halfWidth, y, curve);
     // Near-vertical on purpose. With a true face normal, each blade's random
     // yaw decides how much light it catches, and the field reads as scattered
     // dark shards rather than turf.
     normals.push(0, 0.96, 0.28, 0, 0.96, 0.28);
-    // Slightly darker at the base fakes self-shadowing within the sward.
-    const shade = 0.66 + t * 0.34;
+    // Slightly darker at the base fakes self-shadowing within the sward. Kept
+    // below 1 at the tip so blades never read brighter than the ground.
+    const shade = 0.55 + t * 0.30;
     colors.push(shade, shade, shade, shade, shade, shade);
   }
 
@@ -52,11 +53,54 @@ function buildBlade(segments = 4) {
   return geometry;
 }
 
+const FLOWER_COLORS = [
+  [0.98, 0.98, 0.99], // white
+  [0.98, 0.72, 0.83], // pink
+  [0.99, 0.86, 0.32], // yellow
+  [0.72, 0.80, 0.98], // cornflower
+  [0.96, 0.58, 0.42], // coral
+];
+
+/** A six-petal disc on a short stem. Ten triangles, read from above or aside. */
+function buildFlower() {
+  const positions = [-0.006, 0, 0, 0.006, 0, 0, -0.006, 0.13, 0, 0.006, 0.13, 0];
+  const normals = [0, 0.6, 0.8, 0, 0.6, 0.8, 0, 0.6, 0.8, 0, 0.6, 0.8];
+  const colors = [0.20, 0.42, 0.16, 0.20, 0.42, 0.16, 0.34, 0.60, 0.24, 0.34, 0.60, 0.24];
+  const indices = [0, 1, 2, 2, 1, 3];
+
+  // Petal fan. Vertex colours are white here so the instance colour decides
+  // the bloom, while the stem keeps its own green.
+  const centre = positions.length / 3;
+  positions.push(0, 0.145, 0);
+  normals.push(0, 1, 0);
+  colors.push(1, 1, 1);
+
+  const petals = 6;
+  for (let i = 0; i < petals; i++) {
+    const a = (i / petals) * Math.PI * 2;
+    positions.push(Math.cos(a) * 0.052, 0.138, Math.sin(a) * 0.052);
+    normals.push(0, 1, 0);
+    colors.push(1, 1, 1);
+  }
+  // Wound so the fan's geometric normal points up, matching the declared one.
+  for (let i = 0; i < petals; i++) {
+    indices.push(centre, centre + 1 + ((i + 1) % petals), centre + 1 + i);
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geometry.setIndex(indices);
+  return geometry;
+}
+
 export class GrassField {
-  constructor(field, { radius = 24, spacing = 0.38, maxInstances = 16000 } = {}) {
+  constructor(field, { radius = 24, spacing = 0.38, maxInstances = 16000, flowerRatio = 0.055 } = {}) {
     this.field = field;
     this.radius = radius;
     this.spacing = spacing;
+    this.flowerRatio = flowerRatio;
 
     this.uniforms = {
       uTime: { value: 0 },
@@ -116,6 +160,15 @@ export class GrassField {
 
       shader.fragmentShader = shader.fragmentShader
         .replace('#include <common>', '#include <common>\nvarying float vFade;')
+        .replace('#include <normal_fragment_begin>', /* glsl */`
+          #include <normal_fragment_begin>
+          // Blades and petals are double-sided, so three flips the normal on
+          // back faces and every blade whose random yaw turns it away from the
+          // camera ends up lit from underneath. Ground cover is always lit from
+          // above; forcing the sign is both cheaper and more correct here than
+          // matching winding to normals per blade.
+          normal.y = abs(normal.y);
+        `)
         .replace('#include <dithering_fragment>', /* glsl */`
           #include <dithering_fragment>
           if (vFade < 0.02) discard;
@@ -130,6 +183,24 @@ export class GrassField {
     this.mesh.receiveShadow = true;
     this.mesh.name = 'grass';
     this.mesh.count = 0;
+
+    // Flowers share the reseed pass and the same wind shader, so they sway with
+    // the grass they sit in for one extra draw call.
+    const flowerMaterial = material.clone();
+    flowerMaterial.onBeforeCompile = material.onBeforeCompile;
+    flowerMaterial.customProgramCacheKey = material.customProgramCacheKey;
+    this.flowers = new THREE.InstancedMesh(
+      buildFlower(), flowerMaterial, Math.ceil(maxInstances * flowerRatio) + 16,
+    );
+    this.flowers.frustumCulled = false;
+    this.flowers.castShadow = false;
+    this.flowers.receiveShadow = true;
+    this.flowers.name = 'flowers';
+    this.flowers.count = 0;
+
+    this.group = new THREE.Group();
+    this.group.name = 'groundCover';
+    this.group.add(this.mesh, this.flowers);
 
     this.center = new THREE.Vector2(Infinity, Infinity);
     this.rebuildDistance = 2.0;
@@ -148,7 +219,9 @@ export class GrassField {
     const originZ = Math.floor((cz - radius) / spacing) * spacing;
 
     let count = 0;
+    let flowerCount = 0;
     const max = this.mesh.instanceMatrix.count;
+    const maxFlowers = this.flowers.instanceMatrix.count;
 
     for (let j = 0; j <= steps && count < max; j++) {
       for (let i = 0; i <= steps && count < max; i++) {
@@ -178,21 +251,42 @@ export class GrassField {
         tmpMatrix.compose(tmpPos, tmpQuat, tmpScale);
         this.mesh.setMatrixAt(count, tmpMatrix);
 
+        // Kept well below the terrain's own green: blades take full overhead
+        // light after the normal fix, so authoring them bright blows them out
+        // to near-white in daylight.
         const ao = 0.68 + 0.32 * field.aoAt(x, z);
         const tone = GrassField.jitter(gx, gz, 7);
         tmpColor.setRGB(
-          (0.40 + tone * 0.22) * ao,
-          (0.66 + tone * 0.26) * ao,
-          (0.27 + tone * 0.15) * ao,
+          (0.30 + tone * 0.18) * ao,
+          (0.56 + tone * 0.24) * ao,
+          (0.18 + tone * 0.12) * ao,
         );
         this.mesh.setColorAt(count, tmpColor);
         count++;
+
+        // A sparse scatter of blooms through the same cells, only on the flat.
+        if (flowerCount < maxFlowers
+            && GrassField.jitter(gx, gz, 8) < this.flowerRatio
+            && field.slopeAt(x, z) < 0.34) {
+          const bloom = FLOWER_COLORS[Math.floor(GrassField.jitter(gx, gz, 9) * FLOWER_COLORS.length)];
+          tmpScale.setScalar(0.85 + GrassField.jitter(gx, gz, 10) * 0.5);
+          tmpMatrix.compose(tmpPos, tmpQuat, tmpScale);
+          this.flowers.setMatrixAt(flowerCount, tmpMatrix);
+          tmpColor.setRGB(bloom[0] * ao, bloom[1] * ao, bloom[2] * ao);
+          this.flowers.setColorAt(flowerCount, tmpColor);
+          flowerCount++;
+        }
       }
     }
 
     this.mesh.count = count;
     this.mesh.instanceMatrix.needsUpdate = true;
     if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+
+    this.flowers.count = flowerCount;
+    this.flowers.instanceMatrix.needsUpdate = true;
+    if (this.flowers.instanceColor) this.flowers.instanceColor.needsUpdate = true;
+
     this.center.set(cx, cz);
     this.uniforms.uCenter.value.set(cx, 0, cz);
   }

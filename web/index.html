@@ -2,113 +2,298 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#e8f4fb">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Open Field</title>
 <link rel="icon" href="data:,">
 <style>
-  :root {
-    --ink: #f2f7ff;
-    --dim: rgba(242, 247, 255, 0.62);
-    --panel: rgba(10, 16, 28, 0.42);
-  }
-  * { box-sizing: border-box; }
-  html, body {
-    margin: 0; height: 100%; overflow: hidden; background: #0b1220;
-    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    color: var(--ink);
-    -webkit-font-smoothing: antialiased;
-  }
-  canvas { display: block; }
+/* ---------------------------------------------------------------------------
+   Interface styling after the late-2000s Nintendo system menus: near-white
+   panels floating on soft blue shadow, generous corner radii, a glass sheen
+   across the top of every surface, and one confident accent blue. Type is
+   rounded and widely spaced; nothing is pure black.
+--------------------------------------------------------------------------- */
+:root {
+  --ink:        #33495e;
+  --ink-soft:   #7c92a6;
+  --accent:     #2e9fe0;
+  --accent-dk:  #1d7fba;
+  --berry:      #f2564c;
+  --panel:      rgba(255, 255, 255, 0.80);
+  --panel-edge: rgba(255, 255, 255, 0.95);
+  --shade:      0 6px 22px rgba(18, 62, 98, 0.20), 0 1px 2px rgba(18, 62, 98, 0.14);
+  --radius:     22px;
+  --safe-b:     env(safe-area-inset-bottom, 0px);
+  --safe-l:     env(safe-area-inset-left, 0px);
+  --safe-r:     env(safe-area-inset-right, 0px);
+}
 
-  #hud { position: fixed; inset: 0; pointer-events: none; }
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
-  .panel {
-    position: absolute;
-    background: var(--panel);
-    backdrop-filter: blur(14px) saturate(1.2);
-    -webkit-backdrop-filter: blur(14px) saturate(1.2);
-    border: 1px solid rgba(255, 255, 255, 0.10);
-    border-radius: 14px;
-    padding: 12px 14px;
-    font-size: 13px;
-    line-height: 1.5;
-  }
+html, body {
+  margin: 0; height: 100%; overflow: hidden;
+  background: #bfe3f5;
+  color: var(--ink);
+  font-family: ui-rounded, "SF Pro Rounded", "Hiragino Maru Gothic ProN",
+               Quicksand, Nunito, "Segoe UI Variable", system-ui, sans-serif;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+  touch-action: none;
+  user-select: none; -webkit-user-select: none;
+}
+canvas { display: block; }
 
-  #stats { top: 16px; left: 16px; min-width: 168px; }
-  #stats .row { display: flex; justify-content: space-between; gap: 18px; }
-  #stats .k { color: var(--dim); }
-  #stats .v { font-variant-numeric: tabular-nums; }
+#hud { position: fixed; inset: 0; pointer-events: none; z-index: 2; }
 
-  #score { top: 16px; right: 16px; text-align: right; }
-  #score .n { font-size: 26px; font-weight: 650; line-height: 1.1; font-variant-numeric: tabular-nums; }
-  #score .l { color: var(--dim); font-size: 11px; letter-spacing: 0.09em; text-transform: uppercase; }
+/* --- shared panel treatment --- */
+.panel {
+  position: absolute;
+  background: var(--panel);
+  backdrop-filter: blur(16px) saturate(1.5);
+  -webkit-backdrop-filter: blur(16px) saturate(1.5);
+  border: 1.5px solid var(--panel-edge);
+  border-radius: var(--radius);
+  box-shadow: var(--shade);
+  overflow: hidden;
+}
+/* The glass sheen. A single highlight across the upper half is what reads as
+   the era's plastic-and-glass look. */
+.panel::before {
+  content: ""; position: absolute; inset: 0 0 auto 0; height: 52%;
+  background: linear-gradient(rgba(255,255,255,0.75), rgba(255,255,255,0.05));
+  pointer-events: none;
+}
+.panel > * { position: relative; }
 
-  #help { bottom: 16px; left: 16px; }
-  #help kbd {
-    display: inline-block; min-width: 20px; text-align: center;
-    padding: 1px 6px; margin: 0 1px;
-    border-radius: 5px; border: 1px solid rgba(255,255,255,0.20);
-    background: rgba(255,255,255,0.08);
-    font: inherit; font-size: 11px;
-  }
-  #help .line { color: var(--dim); }
-  #help .line b { color: var(--ink); font-weight: 500; }
+/* --- stats, top left --- */
+#stats { top: calc(14px + env(safe-area-inset-top, 0px)); left: calc(14px + var(--safe-l)); padding: 12px 15px; min-width: 172px; }
+#stats .row { display: flex; align-items: center; gap: 9px; height: 23px; font-size: 13.5px; }
+#stats .row + .row { margin-top: 1px; }
+#stats .ico {
+  width: 19px; height: 19px; flex: none; border-radius: 7px;
+  display: grid; place-items: center; font-size: 11px; color: #fff;
+  background: var(--accent); box-shadow: inset 0 -1px 0 rgba(0,0,0,0.14);
+}
+#stats .ico.sun  { background: linear-gradient(#ffc63f, #f0972a); }
+#stats .ico.alt  { background: linear-gradient(#71c95e, #43a03c); }
+#stats .ico.perf { background: linear-gradient(#5cc0ee, #2b8ec9); }
+#stats .k { color: var(--ink-soft); font-size: 12px; }
+#stats .v { margin-left: auto; font-variant-numeric: tabular-nums; font-weight: 700; }
 
-  #toast {
-    position: absolute; left: 50%; top: 22%; transform: translate(-50%, -6px);
-    font-size: 15px; font-weight: 550; letter-spacing: 0.01em;
-    opacity: 0; transition: opacity .25s ease, transform .25s ease;
-    text-shadow: 0 2px 14px rgba(0,0,0,.55);
-  }
-  #toast.show { opacity: 1; transform: translate(-50%, 0); }
+/* --- berry counter, top right --- */
+#score {
+  top: calc(14px + env(safe-area-inset-top, 0px)); right: calc(14px + var(--safe-r));
+  padding: 10px 16px 10px 12px;
+  display: flex; align-items: center; gap: 11px;
+}
+#score .orb {
+  width: 34px; height: 34px; border-radius: 50%;
+  background: radial-gradient(circle at 34% 30%, #ff9a86, var(--berry) 62%, #c9372f);
+  box-shadow: inset 0 -2px 4px rgba(0,0,0,0.22), 0 2px 6px rgba(200,60,50,0.42);
+  position: relative;
+}
+#score .orb::after {
+  content: ""; position: absolute; left: 22%; top: 16%;
+  width: 30%; height: 24%; border-radius: 50%;
+  background: rgba(255,255,255,0.85);
+}
+#score .n { font-size: 25px; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
+#score .n small { font-size: 14px; font-weight: 700; color: var(--ink-soft); }
+#score .l { font-size: 9.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-soft); margin-top: 3px; }
 
-  #loader {
-    position: fixed; inset: 0; z-index: 10;
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 18px; background: radial-gradient(ellipse at 50% 42%, #1b2c4e 0%, #090e1a 72%);
-    transition: opacity .6s ease;
-  }
-  #loader.hidden { opacity: 0; pointer-events: none; }
-  #loader h1 { margin: 0; font-size: 19px; font-weight: 600; letter-spacing: 0.02em; }
-  #loader .sub { color: var(--dim); font-size: 12.5px; min-height: 1.2em; }
-  #bar { width: 240px; height: 3px; border-radius: 2px; background: rgba(255,255,255,0.12); overflow: hidden; }
-  #bar i { display: block; height: 100%; width: 0%; background: #ffd23f; transition: width .3s ease; }
+/* --- controls key, bottom left (pointer devices only) --- */
+#help { bottom: calc(14px + var(--safe-b)); left: calc(14px + var(--safe-l)); padding: 11px 14px; font-size: 12.5px; }
+#help .row { display: flex; align-items: center; gap: 7px; color: var(--ink-soft); }
+#help .row + .row { margin-top: 7px; }
+#help b { color: var(--ink); font-weight: 700; }
+kbd {
+  display: inline-grid; place-items: center; min-width: 22px; height: 21px;
+  padding: 0 6px; font: inherit; font-size: 11px; font-weight: 700; color: var(--ink);
+  background: linear-gradient(#ffffff, #e4eef5);
+  border: 1.5px solid rgba(120,160,190,0.42);
+  border-bottom-width: 2.5px;
+  border-radius: 7px;
+}
 
-  #startHint {
-    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
-    text-align: center; pointer-events: none;
-    transition: opacity .4s ease;
-  }
-  #startHint .big { font-size: 15px; font-weight: 550; }
-  #startHint .small { color: var(--dim); font-size: 12px; margin-top: 4px; }
-  #startHint.hidden { opacity: 0; }
+/* --- toast --- */
+#toast {
+  position: absolute; left: 50%; top: 19%; transform: translate(-50%, 8px) scale(0.94);
+  padding: 10px 20px; border-radius: 999px;
+  background: var(--panel); border: 1.5px solid var(--panel-edge); box-shadow: var(--shade);
+  backdrop-filter: blur(16px) saturate(1.5); -webkit-backdrop-filter: blur(16px) saturate(1.5);
+  font-size: 14.5px; font-weight: 700; white-space: nowrap;
+  opacity: 0; transition: opacity .22s ease, transform .28s cubic-bezier(.2,1.5,.4,1);
+}
+#toast.show { opacity: 1; transform: translate(-50%, 0) scale(1); }
+
+/* --- touch controls --- */
+#touch { position: absolute; inset: 0; display: none; }
+body.touch #touch { display: block; }
+body.touch #help { display: none; }
+
+#stick {
+  position: absolute; left: calc(26px + var(--safe-l)); bottom: calc(26px + var(--safe-b));
+  width: 132px; height: 132px; border-radius: 50%;
+  background: rgba(255,255,255,0.34);
+  border: 2px solid rgba(255,255,255,0.72);
+  box-shadow: var(--shade), inset 0 2px 12px rgba(255,255,255,0.5);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  pointer-events: auto; touch-action: none;
+}
+#stick .knob {
+  position: absolute; left: 50%; top: 50%; width: 58px; height: 58px; margin: -29px 0 0 -29px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 38% 30%, #ffffff, #d3e6f2 70%, #a8cbe0);
+  border: 1.5px solid rgba(255,255,255,0.95);
+  box-shadow: 0 4px 12px rgba(18,62,98,0.30);
+  transition: transform .06s linear;
+}
+
+.tbtn {
+  position: absolute; pointer-events: auto; touch-action: none;
+  border-radius: 50%; display: grid; place-items: center;
+  font-size: 12px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--ink);
+  background: linear-gradient(rgba(255,255,255,0.92), rgba(226,241,250,0.78));
+  border: 2px solid rgba(255,255,255,0.95);
+  box-shadow: var(--shade);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  transition: transform .08s ease, filter .08s ease;
+}
+.tbtn.down { transform: scale(0.91); filter: brightness(0.94); }
+#btn-jump {
+  right: calc(26px + var(--safe-r)); bottom: calc(38px + var(--safe-b));
+  width: 92px; height: 92px; font-size: 13px;
+  color: #fff; background: linear-gradient(#5cc0ee, var(--accent-dk));
+  text-shadow: 0 1px 2px rgba(0,0,0,0.28);
+}
+#btn-run {
+  right: calc(132px + var(--safe-r)); bottom: calc(96px + var(--safe-b));
+  width: 70px; height: 70px;
+}
+#btn-run.locked { color: #fff; background: linear-gradient(#ffc85a, #ef9a24); }
+#btn-cam {
+  right: calc(30px + var(--safe-r)); top: calc(96px + env(safe-area-inset-top, 0px));
+  width: 54px; height: 54px; font-size: 10px;
+}
+
+/* --- start hint --- */
+#startHint {
+  position: absolute; left: 50%; top: 52%; transform: translate(-50%, -50%);
+  text-align: center; transition: opacity .45s ease;
+  padding: 14px 26px; border-radius: 999px;
+  background: var(--panel); border: 1.5px solid var(--panel-edge); box-shadow: var(--shade);
+  backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+}
+#startHint .big { font-size: 15px; font-weight: 800; }
+#startHint .small { color: var(--ink-soft); font-size: 12px; margin-top: 3px; font-weight: 600; }
+#startHint.hidden { opacity: 0; }
+
+/* --- loader --- */
+#loader {
+  position: fixed; inset: 0; z-index: 10;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px;
+  background: radial-gradient(ellipse at 50% 36%, #ffffff 0%, #d3ecfa 42%, #a8d4ee 100%);
+  transition: opacity .65s ease;
+}
+#loader.hidden { opacity: 0; pointer-events: none; }
+#loader .mark {
+  width: 74px; height: 74px; border-radius: 26px;
+  background: linear-gradient(#ffe14f, #f7c21c);
+  box-shadow: 0 10px 26px rgba(190,150,20,0.36), inset 0 -3px 0 rgba(0,0,0,0.10);
+  display: grid; place-items: center;
+  animation: bob 2.4s ease-in-out infinite;
+}
+/* Two ears and a cheek, drawn in CSS. */
+#loader .mark i {
+  display: block; width: 30px; height: 30px; border-radius: 50%;
+  background: #fff; position: relative;
+}
+#loader .mark i::before, #loader .mark i::after {
+  content: ""; position: absolute; width: 8px; height: 8px; border-radius: 50%; background: #33495e; top: 8px;
+}
+#loader .mark i::before { left: 4px; }
+#loader .mark i::after  { right: 4px; }
+@keyframes bob { 0%,100% { transform: translateY(0) rotate(-3deg); } 50% { transform: translateY(-9px) rotate(3deg); } }
+
+#loader h1 { margin: 0; font-size: 21px; font-weight: 800; letter-spacing: 0.03em; }
+#loader .sub { color: #6d8ba1; font-size: 12.5px; min-height: 1.2em; font-weight: 600; }
+#bar {
+  width: 232px; height: 9px; border-radius: 999px;
+  background: rgba(255,255,255,0.72);
+  border: 1.5px solid rgba(255,255,255,0.95);
+  box-shadow: inset 0 1px 3px rgba(30,80,120,0.18);
+  overflow: hidden;
+}
+#bar i {
+  display: block; height: 100%; width: 0%; border-radius: 999px;
+  background: linear-gradient(90deg, #6fd0f5, var(--accent));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.6);
+  transition: width .35s cubic-bezier(.3,1,.4,1);
+}
+
+/* --- compact phones --- */
+@media (max-width: 560px) {
+  :root { --radius: 18px; }
+  #stats { min-width: 0; padding: 9px 11px; }
+  #stats .row { font-size: 12px; height: 20px; gap: 7px; }
+  #stats .k { display: none; }
+  #score { padding: 8px 13px 8px 9px; gap: 8px; }
+  #score .orb { width: 27px; height: 27px; }
+  #score .n { font-size: 20px; }
+  /* Sits above the character rather than across it on a tall, narrow screen. */
+  #startHint { top: 33%; padding: 12px 20px; max-width: 76vw; }
+  #startHint .big { font-size: 14px; }
+  #stick { width: 116px; height: 116px; }
+  #stick .knob { width: 52px; height: 52px; margin: -26px 0 0 -26px; }
+  #btn-jump { width: 80px; height: 80px; }
+  #btn-run { width: 62px; height: 62px; right: calc(116px + var(--safe-r)); bottom: calc(86px + var(--safe-b)); }
+}
+@media (max-height: 430px) {
+  #stick { bottom: calc(14px + var(--safe-b)); }
+  #btn-jump { bottom: calc(18px + var(--safe-b)); }
+}
 </style>
 </head>
 <body>
 
 <div id="hud">
   <div class="panel" id="stats">
-    <div class="row"><span class="k">fps</span><span class="v" id="s-fps">–</span></div>
-    <div class="row"><span class="k">time</span><span class="v" id="s-time">–</span></div>
-    <div class="row"><span class="k">altitude</span><span class="v" id="s-alt">–</span></div>
-    <div class="row"><span class="k">tris</span><span class="v" id="s-tris">–</span></div>
+    <div class="row"><span class="ico perf">◉</span><span class="k">fps</span><span class="v" id="s-fps">–</span></div>
+    <div class="row"><span class="ico sun">☀</span><span class="k">time</span><span class="v" id="s-time">–</span></div>
+    <div class="row"><span class="ico alt">▲</span><span class="k">height</span><span class="v" id="s-alt">–</span></div>
   </div>
 
   <div class="panel" id="score">
-    <div class="n"><span id="s-berries">0</span> <span style="opacity:.45">/ <span id="s-total">0</span></span></div>
-    <div class="l">berries</div>
+    <div class="orb"></div>
+    <div>
+      <div class="n"><span id="s-berries">0</span><small> / <span id="s-total">0</span></small></div>
+      <div class="l">berries</div>
+    </div>
   </div>
 
   <div class="panel" id="help">
-    <div class="line"><b><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></b> move &nbsp; <b><kbd>shift</kbd></b> sprint &nbsp; <b><kbd>space</kbd></b> jump</div>
-    <div class="line"><b>mouse</b> look &nbsp; <b>wheel</b> zoom &nbsp; <b><kbd>F</kbd></b> free-cam &nbsp; <b><kbd>T</kbd></b> time &nbsp; <b><kbd>esc</kbd></b> release</div>
+    <div class="row"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><b>move</b><kbd>shift</kbd><b>dash</b><kbd>space</kbd><b>jump</b></div>
+    <div class="row"><b>drag</b> look<kbd>F</kbd><b>free cam</b><kbd>T</kbd><b>time</b><kbd>M</kbd><b>sound</b></div>
+  </div>
+
+  <div id="touch">
+    <div id="stick"><div class="knob"></div></div>
+    <div class="tbtn" id="btn-jump">Jump</div>
+    <div class="tbtn" id="btn-run">Dash</div>
+    <div class="tbtn" id="btn-cam">Cam</div>
   </div>
 
   <div id="toast"></div>
-  <div id="startHint"><div class="big">click to look around</div><div class="small">WASD to move</div></div>
+  <div id="startHint"><div class="big">tap to begin</div><div class="small">then move and explore</div></div>
 </div>
 
 <div id="loader">
+  <div class="mark"><i></i></div>
   <h1>Open Field</h1>
   <div id="bar"><i></i></div>
   <div class="sub" id="loader-sub">starting…</div>

@@ -7,15 +7,18 @@ import * as THREE from 'three';
 // triangle normals on a regular grid. Biome colour is resolved per vertex from
 // height and slope, with the baked occlusion folded in.
 
+// Saturated and high-key rather than naturalistic: the target is the readable,
+// poster-flat landscape palette of mid-2000s first-party Nintendo, where
+// ground reads as one confident colour and shading does the rest.
 const PALETTE = {
-  sandDeep: new THREE.Color('#b9a077'),
-  sand: new THREE.Color('#d9c79c'),
-  grass: new THREE.Color('#5c8f3f'),
-  grassDry: new THREE.Color('#7fa049'),
-  grassDark: new THREE.Color('#3f6b30'),
-  rock: new THREE.Color('#6d6660'),
-  rockLight: new THREE.Color('#8a8279'),
-  snow: new THREE.Color('#eaf0f6'),
+  sandDeep: new THREE.Color('#cfae74'),
+  sand: new THREE.Color('#f2dfa8'),
+  grass: new THREE.Color('#69b83f'),
+  grassDry: new THREE.Color('#a3ce4e'),
+  grassDark: new THREE.Color('#468f33'),
+  rock: new THREE.Color('#7d766c'),
+  rockLight: new THREE.Color('#9e968a'),
+  snow: new THREE.Color('#f4f8fc'),
 };
 
 const lerpColor = (a, b, t, out) => out.copy(a).lerp(b, t);
@@ -141,8 +144,9 @@ export function createTerrain(field) {
       const snow = smoothstep(snowLine, snowLine + 9, h) * (1 - smoothstep(0.85, 1.5, slope));
       lerpColor(color, PALETTE.snow, snow, color);
 
-      // Baked occlusion, floored so crevices stay readable.
-      const ao = 0.5 + 0.5 * field.aoTexel(i, j);
+      // Baked occlusion, floored high so crevices read without muddying the
+      // flat-colour look.
+      const ao = 0.62 + 0.38 * field.aoTexel(i, j);
       colors[index * 3] = color.r * ao;
       colors[index * 3 + 1] = color.g * ao;
       colors[index * 3 + 2] = color.b * ao;

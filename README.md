@@ -11,9 +11,14 @@ npm install
 npm start          # build assets, then serve on http://localhost:5173
 ```
 
-Controls: **WASD** move, **shift** sprint, **space** jump, **mouse** look
+**Desktop:** **WASD** move, **shift** dash, **space** jump, **mouse** look
 (click to capture), **wheel** zoom, **F** detached camera, **T** advance time of
-day, **P** pause the day cycle.
+day, **P** pause the day cycle, **M** mute.
+
+**Touch:** left thumbstick to move, drag anywhere to look, **Jump** and a
+latching **Dash** button, **Cam** to detach the camera. Phones are detected from
+pointer type and screen size and get a lighter budget — reduced pixel ratio, a
+smaller shadow map, a tighter grass patch and a wider field of view.
 
 ---
 
@@ -68,7 +73,16 @@ shared table of measurements, so changing a number moves both.
    exporter expects a DOM, and a GLB is only JSON plus a binary buffer, so
    writing the container directly was less work than shimming a browser.
 
-Result: ~82k triangles, 2.9 MB, valid glTF.
+Result: ~85k triangles, 3.1 MB, valid glTF.
+
+Proportions follow the official 3D model rather than the anime: an oversized
+head that is wider than it is tall, a rounded torso rather than a pear, short
+thick limbs, three toes per foot, and large forward-angled cheek pouches. Two
+mistakes worth recording, because both were only visible once rendered — the
+back stripes were painted by a height band that the tail also passes through,
+so they striped the tail as well until the test gained a depth bound; and the
+cheeks were originally aimed straight out to the side, which put half of each
+disc past the silhouette of the head.
 
 ## How the world is made
 
@@ -98,9 +112,27 @@ app, the baked assets, and three.js out of `node_modules`.
 | `web/src/water.js` | Depth baked per vertex; quads entirely above the waterline are dropped. |
 | `web/src/grass.js` | A finite patch that re-seeds when the player leaves its cell. Wind is applied in the vertex shader in world space — blades carry a random yaw, so the shader recovers it from the instance matrix to stop every blade blowing a different way. |
 | `web/src/player.js` | Controller and animation state machine. Clip choice and playback rate both come from ground speed, which is what keeps the feet from skating. |
-| `web/src/props.js`, `effects.js`, `camera.js`, `input.js`, `hud.js` | Instanced scenery, pooled particles, follow/free cameras, input, HUD. |
+| `web/src/audio.js` | Every sound is synthesised — filtered noise for footfalls, enveloped oscillators for jumps and chimes. Consecutive pickups climb a pentatonic scale. |
+| `web/src/props.js`, `effects.js`, `camera.js`, `input.js`, `hud.js` | Instanced scenery, pooled particles, follow/free cameras, unified keyboard+touch input, HUD. |
 
-Thirteen draw calls for the whole scene.
+Fourteen draw calls for the whole scene.
+
+### Look
+
+The target is the late-2000s Nintendo house style, which mostly means
+restraint: a saturated, poster-flat ground palette that reads as one confident
+colour with shading doing the work; billowed clouds thresholded out of fBm
+rather than smeared as haze; and an interface of near-white panels on soft blue
+shadow with generous corner radii, a glass sheen across the top of each surface,
+and a single accent blue.
+
+### Feel
+
+Coyote time forgives a jump pressed just after walking off an edge, an input
+buffer forgives one pressed just before landing, and releasing the button
+mid-rise cuts the climb, so jump height is something the player controls.
+The camera eases back behind the character after a moment without look input,
+which is what makes one-thumb touch play viable.
 
 ## Verification
 

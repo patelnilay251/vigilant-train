@@ -7,7 +7,6 @@ export class Hud {
       fps: document.getElementById('s-fps'),
       time: document.getElementById('s-time'),
       alt: document.getElementById('s-alt'),
-      tris: document.getElementById('s-tris'),
       berries: document.getElementById('s-berries'),
       total: document.getElementById('s-total'),
       toast: document.getElementById('toast'),
@@ -15,6 +14,7 @@ export class Hud {
       loaderSub: document.getElementById('loader-sub'),
       bar: document.querySelector('#bar i'),
       startHint: document.getElementById('startHint'),
+      score: document.getElementById('score'),
     };
 
     this.cache = {};
@@ -30,7 +30,12 @@ export class Hud {
 
   ready() {
     this.el.loader.classList.add('hidden');
-    setTimeout(() => { this.el.loader.style.display = 'none'; }, 700);
+    setTimeout(() => { this.el.loader.style.display = 'none'; }, 750);
+  }
+
+  fail(message) {
+    this.el.loaderSub.textContent = message;
+    this.el.loaderSub.style.color = '#d3574e';
   }
 
   set(key, value) {
@@ -43,29 +48,37 @@ export class Hud {
     this.el.startHint.classList.add('hidden');
   }
 
-  toast(message, duration = 1.4) {
+  toast(message, duration = 1.5) {
     this.el.toast.textContent = message;
     this.el.toast.classList.add('show');
     this._toastTimer = duration;
   }
 
-  update(dt, { altitude, clock, triangles, berries, total }) {
+  /** Bounces the berry counter, so a pickup registers even off-centre. */
+  pulseScore() {
+    const node = this.el.score;
+    node.animate(
+      [{ transform: 'scale(1)' }, { transform: 'scale(1.11)' }, { transform: 'scale(1)' }],
+      { duration: 330, easing: 'cubic-bezier(.3,1.6,.4,1)' },
+    );
+  }
+
+  update(rawDt, { altitude, clock, berries, total }) {
     this.frames++;
-    this.accumulated += dt;
-    if (this.accumulated >= 0.4) {
-      this.set('fps', Math.round(this.frames / this.accumulated));
+    this.accumulated += rawDt;
+    if (this.accumulated >= 0.45) {
+      this.set('fps', String(Math.round(this.frames / this.accumulated)));
       this.frames = 0;
       this.accumulated = 0;
-      this.set('tris', triangles.toLocaleString());
     }
 
     this.set('time', clock);
-    this.set('alt', `${altitude.toFixed(1)} m`);
+    this.set('alt', `${altitude.toFixed(1)}m`);
     this.set('berries', String(berries));
     this.set('total', String(total));
 
     if (this._toastTimer > 0) {
-      this._toastTimer -= dt;
+      this._toastTimer -= rawDt;
       if (this._toastTimer <= 0) this.el.toast.classList.remove('show');
     }
   }

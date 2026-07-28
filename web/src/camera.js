@@ -27,6 +27,14 @@ export class ThirdPersonCamera {
     this.smoothedPivot = new THREE.Vector3();
     this.initialised = false;
 
+    // Soft auto-follow: after a moment without manual look input the rig drifts
+    // back behind the character, so one-handed touch play does not require
+    // constant steering.
+    this.autoAlign = true;
+    this.idleLookTime = 0;
+    this.autoAlignDelay = 1.1;
+    this.autoAlignRate = 1.3;
+
     this._offset = new THREE.Vector3();
     this._probe = new THREE.Vector3();
     this._desired = new THREE.Vector3();
@@ -39,10 +47,27 @@ export class ThirdPersonCamera {
     return { forward, right };
   }
 
-  update(dt, focus, look, zoom) {
+  /**
+   * @param {number} [travelHeading] direction the subject is moving in, if any.
+   *   Supplying it lets the rig ease itself back behind them.
+   */
+  update(dt, focus, look, zoom, travelHeading = null) {
     this.yaw -= look.dx;
     this.pitch = clamp(this.pitch + look.dy, -0.38, 1.18);
     this.desiredDistance = clamp(this.desiredDistance + zoom, this.minDistance, this.maxDistance);
+
+    if (look.dx !== 0 || look.dy !== 0) this.idleLookTime = 0;
+    else this.idleLookTime += dt;
+
+    if (this.autoAlign && travelHeading !== null && this.idleLookTime > this.autoAlignDelay) {
+      // The rig sits opposite the subject's heading, so the target yaw is the
+      // heading turned half a turn.
+      const target = travelHeading + Math.PI;
+      let delta = target - this.yaw;
+      while (delta > Math.PI) delta -= Math.PI * 2;
+      while (delta < -Math.PI) delta += Math.PI * 2;
+      this.yaw += delta * (1 - Math.exp(-this.autoAlignRate * dt));
+    }
     this.distance += (this.desiredDistance - this.distance) * (1 - Math.exp(-dt * 11));
 
     this.pivot.set(focus.x, focus.y + 0.82, focus.z);

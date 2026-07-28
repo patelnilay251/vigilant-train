@@ -9,14 +9,25 @@ import * as THREE from 'three';
 
 const clamp = (x, lo, hi) => (x < lo ? lo : x > hi ? hi : x);
 
-const WALK_SPEED = 2.5;
-const RUN_SPEED = 5.6;
-const ACCELERATION = 24;
+const WALK_SPEED = 2.6;
+const RUN_SPEED = 5.8;
+const ACCELERATION = 26;
 const GROUND_DRAG = 12;
 const AIR_DRAG = 1.4;
-const GRAVITY = -21;
-const JUMP_VELOCITY = 6.9;
+const GRAVITY = -23;
+const JUMP_VELOCITY = 7.4;
 const TURN_RATE = 13;
+
+// Platformer feel, in seconds.
+//
+// Coyote time forgives a jump pressed just after walking off an edge; the
+// buffer forgives one pressed just before landing. Both are invisible when
+// they work and immediately felt when they are missing.
+const COYOTE_TIME = 0.12;
+const JUMP_BUFFER = 0.16;
+// Releasing the button mid-rise cuts the climb, giving a jump whose height the
+// player actually controls rather than one fixed arc.
+const JUMP_CUT = 0.45;
 
 export class Player {
   constructor(gltf, field) {
@@ -54,7 +65,7 @@ export class Player {
     this.actions = {};
     for (const clip of gltf.animations) {
       const action = this.mixer.clipAction(clip);
-      if (clip.name === 'jump') {
+      if (clip.name === 'jump' || clip.name === 'cheer') {
         action.setLoop(THREE.LoopOnce, 1);
         action.clampWhenFinished = true;
       }
@@ -70,6 +81,9 @@ export class Player {
 
     this.onFootstep = null;
     this._footPhase = 0;
+    this._coyote = 0;
+    this._buffer = 0;
+    this._cheerTimer = 0;
     // Turned off when inspecting the model, so it stands upright regardless of
     // the ground it happens to be on.
     this.leanEnabled = true;
@@ -135,10 +149,22 @@ export class Player {
     }
 
     // ---- jump and gravity
-    if (input.consumeJump() && this.grounded) {
+    this._coyote = this.grounded ? COYOTE_TIME : Math.max(0, this._coyote - dt);
+    this._buffer = input.consumeJump() ? JUMP_BUFFER : Math.max(0, this._buffer - dt);
+
+    if (this._buffer > 0 && this._coyote > 0) {
       this.velocity.y = JUMP_VELOCITY;
       this.grounded = false;
+      this._coyote = 0;
+      this._buffer = 0;
       this.play('jump', 0.08);
+      if (this.onJump) this.onJump(this.position);
+    }
+
+    // Cut the rise when the button is released, before gravity is applied so
+    // the same frame does not both cut and accelerate.
+    if (!input.jumpHeld && this.velocity.y > 0) {
+      this.velocity.y += GRAVITY * dt * (1 / JUMP_CUT - 1);
     }
     this.velocity.y += GRAVITY * dt;
 
@@ -194,7 +220,20 @@ export class Player {
     this.mixer.update(dt);
   }
 
+  /** Plays the pickup celebration, which briefly overrides locomotion. */
+  cheer() {
+    this._cheerTimer = 0.62;
+    this.play('cheer', 0.06);
+  }
+
   _updateAnimation(dt) {
+    if (this._cheerTimer > 0) {
+      this._cheerTimer -= dt;
+      // Cut the celebration short if the player is already running again.
+      if (this.speed < WALK_SPEED * 1.2) return;
+      this._cheerTimer = 0;
+    }
+
     if (!this.grounded) {
       this.play('jump', 0.12);
       return;

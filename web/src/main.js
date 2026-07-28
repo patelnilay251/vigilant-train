@@ -12,8 +12,42 @@ import { ThirdPersonCamera, FreeCamera } from './camera.js';
 import { Particles } from './effects.js';
 import { Input } from './input.js';
 import { Hud } from './hud.js';
+import { Audio } from './audio.js';
 
 const hud = new Hud();
+
+/**
+ * Phones get a smaller world budget. Detected from pointer type and the short
+ * screen edge rather than a user-agent string, so a small laptop window and a
+ * desktop-class tablet both land somewhere sensible.
+ */
+function pickQuality() {
+  const coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+  const short = Math.min(window.innerWidth, window.innerHeight) < 780;
+  const lean = coarse || short;
+
+  return lean
+    ? {
+      lean: true,
+      pixelRatio: Math.min(window.devicePixelRatio || 1, 1.6),
+      shadowMapSize: 1024,
+      grass: { radius: 17, spacing: 0.48, maxInstances: 6500 },
+      particles: 360,
+      waterResolution: 150,
+      fov: 64,
+      far: 900,
+    }
+    : {
+      lean: false,
+      pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
+      shadowMapSize: 2048,
+      grass: { radius: 24, spacing: 0.38, maxInstances: 16000 },
+      particles: 700,
+      waterResolution: 220,
+      fov: 58,
+      far: 1400,
+    };
+}
 
 async function fetchTyped(url, Type, label, progress) {
   progress(label);
@@ -24,60 +58,62 @@ async function fetchTyped(url, Type, label, progress) {
 
 async function loadAssets(progress) {
   const manifest = await (await fetch('/assets/world.json')).json();
-
   const [heights, ao, trees, rocks] = await Promise.all([
-    fetchTyped('/assets/heightmap.bin', Float32Array, 'heightfield', progress),
-    fetchTyped('/assets/ao.bin', Uint8Array, 'occlusion', progress),
-    fetchTyped('/assets/trees.bin', Float32Array, 'forest', progress),
-    fetchTyped('/assets/rocks.bin', Float32Array, 'rocks', progress),
+    fetchTyped('/assets/heightmap.bin', Float32Array, 'shaping the land', progress),
+    fetchTyped('/assets/ao.bin', Uint8Array, 'settling the light', progress),
+    fetchTyped('/assets/trees.bin', Float32Array, 'growing the woods', progress),
+    fetchTyped('/assets/rocks.bin', Float32Array, 'placing stones', progress),
   ]);
-
-  progress('character');
+  progress('waking the traveller');
   const gltf = await new GLTFLoader().loadAsync('/assets/character.glb');
-
   return { manifest, heights, ao, trees, rocks, gltf };
 }
 
 async function boot() {
-  const steps = ['world data', 'heightfield', 'occlusion', 'forest', 'rocks', 'character'];
+  const quality = pickQuality();
+
+  const steps = 6;
   let step = 0;
   const progress = (label) => {
-    step = Math.min(step + 1, steps.length);
-    hud.progress(step / (steps.length + 2), label);
+    step = Math.min(step + 1, steps);
+    hud.progress(step / (steps + 2), label);
   };
 
-  hud.progress(0.04, 'world data');
+  hud.progress(0.05, 'reading the map');
   const { manifest, heights, ao, trees, rocks, gltf } = await loadAssets(progress);
 
-  // ---- renderer
-  const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  const renderer = new THREE.WebGLRenderer({ antialias: !quality.lean, powerPreference: 'high-performance' });
+  renderer.setPixelRatio(quality.pixelRatio);
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.type = quality.lean ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.05;
+  renderer.toneMappingExposure = 1.12;
   document.body.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.1, 1400);
+  const camera = new THREE.PerspectiveCamera(
+    quality.fov, window.innerWidth / window.innerHeight, 0.1, quality.far,
+  );
 
-  hud.progress(0.78, 'building terrain');
-  await new Promise((r) => requestAnimationFrame(r));
+  const settle = () => new Promise((r) => requestAnimationFrame(r));
+
+  hud.progress(0.78, 'raising the hills');
+  await settle();
 
   const field = new Heightfield(manifest, heights, ao);
   const terrain = createTerrain(field);
   terrain.updateMatrix();
   scene.add(terrain);
 
-  const water = createWater(field);
+  const water = createWater(field, { resolution: quality.waterResolution });
   if (water) {
     water.updateMatrix();
     scene.add(water);
   }
 
-  hud.progress(0.86, 'planting forest');
-  await new Promise((r) => requestAnimationFrame(r));
+  hud.progress(0.87, 'planting the meadow');
+  await settle();
 
   scene.add(createTrees(trees, manifest.instanceStride));
   scene.add(createRocks(rocks, manifest.instanceStride));
@@ -86,18 +122,17 @@ async function boot() {
   berries.group.name = 'berryField';
   scene.add(berries.group);
 
-  const grass = new GrassField(field);
-  scene.add(grass.mesh);
+  const grass = new GrassField(field, quality.grass);
+  scene.add(grass.group);
 
-  const sky = new Sky(scene, manifest.worldSize);
+  const sky = new Sky(scene, manifest.worldSize, { shadowMapSize: quality.shadowMapSize });
 
-  const particles = new Particles();
+  const particles = new Particles(quality.particles);
   scene.add(particles.points);
 
-  hud.progress(0.95, 'waking up');
-  await new Promise((r) => requestAnimationFrame(r));
+  hud.progress(0.95, 'almost there');
+  await settle();
 
-  // ---- actors
   const player = new Player(gltf, field);
   scene.add(player.root);
 
@@ -105,45 +140,63 @@ async function boot() {
   const freeCam = new FreeCamera(camera, field);
   let freeCamActive = false;
 
+  const audio = new Audio();
   const input = new Input(renderer.domElement);
+
+  // Audio contexts may only start from a gesture, so the first tap does double
+  // duty: dismiss the hint and open the mixer.
+  input.onFirstInput = () => {
+    audio.resume();
+    hud.hideStartHint();
+  };
   input.onLockChange = (locked) => { if (locked) hud.hideStartHint(); };
 
   input.onKey('KeyF', () => {
     freeCamActive = !freeCamActive;
     if (freeCamActive) freeCam.adoptFrom(camera, rig.yaw, rig.pitch);
-    hud.toast(freeCamActive ? 'free camera — Q/E up·down' : 'following character');
+    hud.toast(freeCamActive ? 'free camera' : 'following');
   });
-
   input.onKey('KeyT', () => {
     sky.setTimeOfDay(sky.timeOfDay + 0.08);
-    hud.toast(`time ${sky.clockLabel}`);
+    hud.toast(`${sky.clockLabel}`);
   });
-
   input.onKey('KeyP', () => {
     sky.paused = !sky.paused;
     hud.toast(sky.paused ? 'time paused' : 'time running');
   });
+  input.onKey('KeyM', () => {
+    audio.setMuted(!audio.muted);
+    hud.toast(audio.muted ? 'sound off' : 'sound on');
+  });
 
   player.onFootstep = (position, speed) => {
-    if (player.wading) particles.splash(position);
-    else particles.dust(position, Math.min(speed / 4, 1.4));
+    if (player.wading) {
+      particles.splash(position);
+      audio.splash();
+    } else {
+      particles.dust(position, Math.min(speed / 4, 1.4));
+      audio.step(speed > 3.4);
+    }
   };
+  player.onJump = () => audio.jump();
   player.onLand = (position) => {
     particles.emit(position.x, position.y + 0.04, position.z, {
-      count: 10, color: [0.78, 0.72, 0.58], speed: 1.5, spread: 1.2,
+      count: 10, color: [0.82, 0.76, 0.62], speed: 1.5, spread: 1.2,
       size: 12, life: 0.5, gravity: -2.4, drag: 3.0, upward: 0.5,
     });
+    audio.land();
   };
 
   let collected = 0;
 
-  window.addEventListener('resize', () => {
+  const resize = () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
-  });
+  };
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', () => setTimeout(resize, 120));
 
-  // ---- loop
   const clock = new THREE.Clock();
   let elapsed = 0;
   let frameIndex = 0;
@@ -166,7 +219,7 @@ async function boot() {
       player.mixer.update(dt);
     } else {
       player.update(dt, input, rig);
-      rig.update(dt, player.position, look, zoom);
+      rig.update(dt, player.position, look, zoom, player.speed > 0.5 ? player.facing : null);
     }
 
     const focus = freeCamActive ? camera.position : player.position;
@@ -177,10 +230,19 @@ async function boot() {
     if (water) water.userData.update(elapsed, camera, sky);
 
     if (!freeCamActive) {
-      for (const berry of berries.collect(player.position)) {
-        collected++;
-        particles.pickup(berry.x, berry.y + 0.3, berry.z);
-        hud.toast(berries.remaining === 0 ? 'every berry found' : 'berry +1', 1.0);
+      const picked = berries.collect(player.position);
+      if (picked.length) {
+        for (const berry of picked) {
+          collected++;
+          particles.pickup(berry.x, berry.y + 0.3, berry.z);
+        }
+        audio.pickup();
+        player.cheer();
+        hud.pulseScore();
+        if (berries.remaining === 0) {
+          hud.toast('every berry found', 3.5);
+          audio.fanfare();
+        }
       }
     }
 
@@ -189,7 +251,6 @@ async function boot() {
     hud.update(rawDt, {
       altitude: player.position.y,
       clock: sky.clockLabel,
-      triangles: renderer.info.render.triangles,
       berries: collected,
       total: manifest.berries.length,
     });
@@ -202,9 +263,9 @@ async function boot() {
   clock.start();
   frame();
 
-  // Handle for automated checks and for poking at the scene from the console.
+  // Handle for automated capture and for poking at the scene from the console.
   window.__app = {
-    THREE, scene, camera, renderer, player, rig, sky, field, berries, grass, manifest,
+    THREE, scene, camera, renderer, player, rig, sky, field, berries, grass, audio, manifest, quality,
     // Lets automated capture wait on rendered frames instead of wall-clock time,
     // which matters a lot when software rendering runs at a couple of fps.
     frameIndex: () => frameIndex,
@@ -218,8 +279,9 @@ async function boot() {
       rig.pitch = pitch;
       rig.desiredDistance = distance;
       rig.distance = distance;
+      // Capture sets the angle deliberately; drifting back would undo it.
+      rig.autoAlign = false;
     },
-    /** Detach the camera and place it explicitly. Bypasses the follow boom. */
     flyTo: (x, y, z, yaw, pitch) => {
       freeCamActive = true;
       camera.position.set(x, y, z);
@@ -229,11 +291,11 @@ async function boot() {
     follow: () => { freeCamActive = false; },
     /** Hide the world and show the character alone, for inspecting the asset. */
     solo: (on) => {
-      for (const name of ['terrain', 'water', 'trees', 'rocks', 'grass', 'berryField', 'particles', 'sky']) {
+      for (const name of ['terrain', 'water', 'trees', 'rocks', 'groundCover', 'berryField', 'particles', 'sky']) {
         const object = scene.getObjectByName(name);
         if (object) object.visible = !on;
       }
-      scene.background = on ? new THREE.Color('#39415c') : null;
+      scene.background = on ? new THREE.Color('#5a7fa8') : null;
       scene.fog = on ? null : sky.fog;
       player.leanEnabled = !on;
       if (on) {
@@ -246,9 +308,5 @@ async function boot() {
 
 boot().catch((error) => {
   console.error(error);
-  const sub = document.getElementById('loader-sub');
-  if (sub) {
-    sub.textContent = String(error && error.message ? error.message : error);
-    sub.style.color = '#ff8a8a';
-  }
+  hud.fail(String(error && error.message ? error.message : error));
 });

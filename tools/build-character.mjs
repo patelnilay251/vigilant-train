@@ -2,7 +2,7 @@
 //
 // Pipeline: an implicit surface (blended SDF primitives) is meshed with surface
 // nets, painted per-vertex from a region classifier, bound to a hand-authored
-// skeleton with distance-falloff weights, and finally given four animation clips
+// skeleton with distance-falloff weights, and finally given animation clips
 // baked from analytic pose functions. Nothing is hand-modelled; changing a
 // number in ANATOMY below changes both the silhouette and the rig, because the
 // field and the skeleton read from the same table.
@@ -21,39 +21,45 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = path.resolve(__dirname, '../web/public/assets');
 
 // ---------------------------------------------------------------------------
-// Palette. Authored in sRGB because that is how anyone reasons about colour,
-// then converted once at write time: glTF vertex colours are linear.
+// Palette, authored in sRGB and converted once at write time because glTF
+// vertex colours are linear.
 // ---------------------------------------------------------------------------
 
-const YELLOW = [0.988, 0.792, 0.129];
-const BROWN = [0.396, 0.220, 0.086];
-const DARK = [0.106, 0.086, 0.078];
-const RED = [0.878, 0.157, 0.129];
+const YELLOW = [1.000, 0.800, 0.090];
+const BROWN = [0.451, 0.259, 0.110];   // back stripes, tail base
+const EAR_TIP = [0.157, 0.110, 0.078]; // near-black, not the stripe brown
+const DARK = [0.086, 0.071, 0.067];
+const RED = [0.898, 0.157, 0.086];
 const WHITE = [1.0, 1.0, 1.0];
-const TONGUE = [0.706, 0.239, 0.286];
+const TONGUE = [0.784, 0.310, 0.353];
 
 const srgbToLinear = (c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
 
 // ---------------------------------------------------------------------------
-// Anatomy. +Y up, +Z forward. Roughly 1.19 units from floor to ear tip.
+// Anatomy. +Y up, +Z forward. ~1.19 units from floor to ear tip.
+//
+// Proportioned against the official 3D model rather than the anime: the head is
+// oversized and wider than it is tall, the torso is a rounded egg rather than a
+// pear, and the limbs are short and thick.
 // ---------------------------------------------------------------------------
 
 const ANATOMY = {
-  torsoUpper: { c: [0, 0.425, 0.005], r: 0.175 },
-  torsoLower: { c: [0, 0.255, 0.0], r: 0.215 },
-  head: { c: [0, 0.66, 0.015], r: [0.25, 0.235, 0.235] },
-  cheek: { c: [0.172, 0.605, 0.092], r: 0.09 },
+  torsoLower: { c: [0, 0.235, 0.0], r: 0.228 },
+  torsoUpper: { c: [0, 0.395, 0.012], r: 0.192 },
+  head: { c: [0, 0.625, 0.022], r: [0.278, 0.252, 0.250] },
+  cheek: { c: [0.152, 0.574, 0.162], r: 0.095 },
   ear: {
-    root: [0.108, 0.845, -0.02],
-    mid: [0.2, 1.02, -0.09],
-    tip: [0.295, 1.19, -0.175],
-    rRoot: 0.066, rMid: 0.048, rTip: 0.024,
+    root: [0.112, 0.800, -0.015],
+    mid: [0.205, 0.985, -0.080],
+    tip: [0.292, 1.170, -0.150],
+    rRoot: 0.092, rMid: 0.064, rTip: 0.023,
   },
-  arm: { shoulder: [0.165, 0.455, 0.01], hand: [0.248, 0.312, 0.058], rTop: 0.062, rEnd: 0.053 },
-  leg: { hip: [0.1, 0.198, 0.0], ankle: [0.125, 0.052, 0.0], rTop: 0.092, rEnd: 0.074 },
-  foot: { c: [0.128, 0.046, 0.048], r: [0.08, 0.048, 0.116] },
-  // Strong direction reversals; the tip stays just under the crown of the head
-  // so it does not poke through the silhouette from the front.
+  arm: { shoulder: [0.172, 0.425, 0.012], hand: [0.238, 0.292, 0.048], rTop: 0.068, rEnd: 0.060 },
+  leg: { hip: [0.104, 0.185, 0.0], ankle: [0.128, 0.046, 0.005], rTop: 0.100, rEnd: 0.084 },
+  foot: { c: [0.132, 0.042, 0.052], r: [0.086, 0.044, 0.118] },
+  // Three toes per foot, splayed across the front of the pad.
+  toes: { z: 0.140, y: 0.038, spread: 0.046, r: 0.031 },
+  fingers: { spread: 0.030, r: 0.024 },
   tail: {
     pts: [
       [0, 0.24, -0.17],
@@ -75,9 +81,9 @@ const MIRROR = [1, -1];
 
 function tailField(x, y, z) {
   const { pts, radii, flatten } = ANATOMY.tail;
-  // Evaluating in a space stretched along X yields a shape that is thin along X.
-  // Dividing the result by the stretch keeps the field a conservative (Lipschitz
-  // <= 1) distance bound, which is what the mesher's Newton step relies on.
+  // Evaluating in a space stretched along X yields a shape thin along X.
+  // Dividing the result by the stretch keeps the field a conservative distance
+  // bound, which is what the mesher's Newton step relies on.
   const fx = x * flatten;
   let d = Infinity;
   for (let i = 0; i < pts.length - 1; i++) {
@@ -85,7 +91,7 @@ function tailField(x, y, z) {
     const b = pts[i + 1];
     const seg = sdRoundCone(fx, y, z, a[0], a[1], a[2], b[0], b[1], b[2], radii[i], radii[i + 1]);
     // Hard union, not smin: the creases between segments are the whole point.
-    // Smoothing them is what turns a lightning bolt into a paddle.
+    // Smoothing them turns a lightning bolt into a paddle.
     d = Math.min(d, seg);
   }
   return d / flatten;
@@ -94,31 +100,51 @@ function tailField(x, y, z) {
 function shape(x, y, z) {
   const A = ANATOMY;
 
-  // Pear-shaped torso from two spheres.
   let d = smin(
-    sdSphere(x, y, z, A.torsoUpper.c[0], A.torsoUpper.c[1], A.torsoUpper.c[2], A.torsoUpper.r),
     sdSphere(x, y, z, A.torsoLower.c[0], A.torsoLower.c[1], A.torsoLower.c[2], A.torsoLower.r),
-    0.1,
+    sdSphere(x, y, z, A.torsoUpper.c[0], A.torsoUpper.c[1], A.torsoUpper.c[2], A.torsoUpper.r),
+    0.115,
   );
 
-  d = smin(d, sdEllipsoid(x, y, z, A.head.c[0], A.head.c[1], A.head.c[2], A.head.r[0], A.head.r[1], A.head.r[2]), 0.055);
+  d = smin(d, sdEllipsoid(x, y, z, A.head.c[0], A.head.c[1], A.head.c[2], A.head.r[0], A.head.r[1], A.head.r[2]), 0.06);
 
   for (const s of MIRROR) {
-    d = smin(d, sdSphere(x, y, z, s * A.cheek.c[0], A.cheek.c[1], A.cheek.c[2], A.cheek.r), 0.05);
+    d = smin(d, sdSphere(x, y, z, s * A.cheek.c[0], A.cheek.c[1], A.cheek.c[2], A.cheek.r), 0.055);
 
     const e = A.ear;
     const lower = sdRoundCone(x, y, z, s * e.root[0], e.root[1], e.root[2], s * e.mid[0], e.mid[1], e.mid[2], e.rRoot, e.rMid);
     const upper = sdRoundCone(x, y, z, s * e.mid[0], e.mid[1], e.mid[2], s * e.tip[0], e.tip[1], e.tip[2], e.rMid, e.rTip);
-    d = smin(d, Math.min(lower, upper), 0.042);
+    d = smin(d, Math.min(lower, upper), 0.045);
 
+    // Arm, with a hint of separated digits on the paw.
     const a = A.arm;
-    d = smin(d, sdRoundCone(x, y, z, s * a.shoulder[0], a.shoulder[1], a.shoulder[2], s * a.hand[0], a.hand[1], a.hand[2], a.rTop, a.rEnd), 0.05);
+    let limb = sdRoundCone(x, y, z, s * a.shoulder[0], a.shoulder[1], a.shoulder[2], s * a.hand[0], a.hand[1], a.hand[2], a.rTop, a.rEnd);
+    for (let f = -1; f <= 1; f++) {
+      limb = smin(limb, sdSphere(
+        x, y, z,
+        s * (a.hand[0] + f * A.fingers.spread * 0.6),
+        a.hand[1] - 0.030,
+        a.hand[2] + f * A.fingers.spread * 0.5 + 0.020,
+        A.fingers.r,
+      ), 0.030);
+    }
+    d = smin(d, limb, 0.055);
 
+    // Leg, foot pad and toes.
     const l = A.leg;
     const f = A.foot;
-    let limb = sdRoundCone(x, y, z, s * l.hip[0], l.hip[1], l.hip[2], s * l.ankle[0], l.ankle[1], l.ankle[2], l.rTop, l.rEnd);
-    limb = smin(limb, sdEllipsoid(x, y, z, s * f.c[0], f.c[1], f.c[2], f.r[0], f.r[1], f.r[2]), 0.04);
-    d = smin(d, limb, 0.055);
+    let foot = sdRoundCone(x, y, z, s * l.hip[0], l.hip[1], l.hip[2], s * l.ankle[0], l.ankle[1], l.ankle[2], l.rTop, l.rEnd);
+    foot = smin(foot, sdEllipsoid(x, y, z, s * f.c[0], f.c[1], f.c[2], f.r[0], f.r[1], f.r[2]), 0.045);
+    for (let t = -1; t <= 1; t++) {
+      foot = smin(foot, sdSphere(
+        x, y, z,
+        s * (f.c[0] + t * A.toes.spread),
+        A.toes.y,
+        A.toes.z - Math.abs(t) * 0.016,
+        A.toes.r,
+      ), 0.026);
+    }
+    d = smin(d, foot, 0.06);
   }
 
   // Small blend so the tail joins the rump cleanly without eroding its notches.
@@ -126,7 +152,7 @@ function shape(x, y, z) {
 }
 
 // ---------------------------------------------------------------------------
-// Region classifier: which colour a point on the surface should take.
+// Region classifier: which colour a point on the surface takes.
 // ---------------------------------------------------------------------------
 
 function surfaceColor(x, y, z) {
@@ -139,7 +165,8 @@ function surfaceColor(x, y, z) {
       s * e.root[0], e.root[1], e.root[2],
       s * e.tip[0], e.tip[1], e.tip[2],
     );
-    if (distance < 0.12 && t > 0.58) return BROWN;
+    // Top third of the ear, matching the reference silhouette.
+    if (distance < 0.12 && t > 0.64) return EAR_TIP;
   }
 
   const t0 = A.tail.pts[0];
@@ -149,9 +176,11 @@ function surfaceColor(x, y, z) {
     if (distance < 0.10) return BROWN;
   }
 
-  // Two bands across the back only.
-  if (z < -0.03 && Math.abs(x) < 0.19) {
-    if ((y > 0.335 && y < 0.402) || (y > 0.448 && y < 0.508)) return BROWN;
+  // Two bands across the back of the torso only. The far bound matters: the
+  // torso's back surface sits near z = -0.23, and without it the bands also
+  // paint themselves across the tail, which passes through the same height.
+  if (z < -0.04 && z > -0.25 && Math.abs(x) < 0.20) {
+    if ((y > 0.330 && y < 0.398) || (y > 0.444 && y < 0.506)) return BROWN;
   }
 
   return YELLOW;
@@ -164,17 +193,15 @@ function surfaceColor(x, y, z) {
 
 function buildSkeleton() {
   const A = ANATOMY;
-  const ear = A.ear;
-  const arm = A.arm;
-  const leg = A.leg;
+  const { ear, arm, leg } = A;
   const tail = A.tail.pts;
 
   const bones = [
     { name: 'root', parent: -1, pos: [0, 0, 0] },
-    { name: 'hips', parent: 0, pos: [0, 0.235, -0.01], seg: [[0, 0.195, -0.01], [0, 0.335, 0]], r: 0.185 },
-    { name: 'spine', parent: 1, pos: [0, 0.395, 0], seg: [[0, 0.335, 0], [0, 0.46, 0.005]], r: 0.16 },
-    { name: 'chest', parent: 2, pos: [0, 0.5, 0.005], seg: [[0, 0.46, 0.005], [0, 0.575, 0.01]], r: 0.16 },
-    { name: 'head', parent: 3, pos: [0, 0.615, 0.01], seg: [[0, 0.6, 0.01], [0, 0.775, 0.015]], r: 0.215 },
+    { name: 'hips', parent: 0, pos: [0, 0.230, -0.01], seg: [[0, 0.190, -0.01], [0, 0.330, 0]], r: 0.190 },
+    { name: 'spine', parent: 1, pos: [0, 0.385, 0.005], seg: [[0, 0.330, 0], [0, 0.450, 0.008]], r: 0.170 },
+    { name: 'chest', parent: 2, pos: [0, 0.480, 0.010], seg: [[0, 0.450, 0.008], [0, 0.555, 0.014]], r: 0.170 },
+    { name: 'head', parent: 3, pos: [0, 0.585, 0.016], seg: [[0, 0.575, 0.016], [0, 0.760, 0.022]], r: 0.230 },
   ];
 
   const index = (name) => bones.findIndex((b) => b.name === name);
@@ -183,11 +210,11 @@ function buildSkeleton() {
     const m = (p) => [s * p[0], p[1], p[2]];
     bones.push({
       name: `ear.${suffix}`, parent: index('head'), pos: m(ear.root),
-      seg: [m(ear.root), m(ear.mid)], r: 0.075,
+      seg: [m(ear.root), m(ear.mid)], r: 0.085,
     });
     bones.push({
       name: `earTip.${suffix}`, parent: bones.length - 1, pos: m(ear.mid),
-      seg: [m(ear.mid), m(ear.tip)], r: 0.075,
+      seg: [m(ear.mid), m(ear.tip)], r: 0.080,
     });
   }
 
@@ -195,11 +222,11 @@ function buildSkeleton() {
     const m = (p) => [s * p[0], p[1], p[2]];
     bones.push({
       name: `arm.${suffix}`, parent: index('chest'), pos: m(arm.shoulder),
-      seg: [m(arm.shoulder), m(arm.hand)], r: 0.08,
+      seg: [m(arm.shoulder), m(arm.hand)], r: 0.085,
     });
     bones.push({
       name: `hand.${suffix}`, parent: bones.length - 1, pos: m(arm.hand),
-      seg: [m(arm.hand), m(arm.hand)], r: 0.062,
+      seg: [m(arm.hand), m(arm.hand)], r: 0.070,
     });
   }
 
@@ -207,11 +234,11 @@ function buildSkeleton() {
     const m = (p) => [s * p[0], p[1], p[2]];
     bones.push({
       name: `leg.${suffix}`, parent: index('hips'), pos: m(leg.hip),
-      seg: [m(leg.hip), m(leg.ankle)], r: 0.095,
+      seg: [m(leg.hip), m(leg.ankle)], r: 0.100,
     });
     bones.push({
       name: `foot.${suffix}`, parent: bones.length - 1, pos: m(leg.ankle),
-      seg: [m(ANATOMY.foot.c), m(ANATOMY.foot.c)], r: 0.09,
+      seg: [m(A.foot.c), [s * A.foot.c[0], A.toes.y, A.toes.z]], r: 0.095,
     });
   }
 
@@ -252,7 +279,6 @@ function skinWeights(x, y, z) {
   const top = candidates.slice(0, 4);
 
   if (top.length === 0) {
-    // Fall back to the nearest bone outright so no vertex is left unbound.
     let best = BONE_INDEX.hips;
     let bestD = Infinity;
     for (let i = 0; i < BONES.length; i++) {
@@ -280,7 +306,6 @@ function createMesh() {
   return { positions: [], normals: [], colors: [], joints: [], weights: [], indices: [] };
 }
 
-const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const cross = (a, b) => [
   a[1] * b[2] - a[2] * b[1],
   a[2] * b[0] - a[0] * b[2],
@@ -291,16 +316,27 @@ function normalize(v) {
   return l < 1e-12 ? [0, 1, 0] : [v[0] / l, v[1] / l, v[2] / l];
 }
 
-function orthonormalBasis(n) {
+/** Tangent frame around `n`, optionally spun by `roll` radians about it. */
+function orthonormalBasis(n, roll = 0) {
   const up = Math.abs(n[1]) > 0.95 ? [1, 0, 0] : [0, 1, 0];
-  const t = normalize(cross(up, n));
-  return [t, cross(n, t), n];
+  let t = normalize(cross(up, n));
+  let b = cross(n, t);
+  if (roll !== 0) {
+    const c = Math.cos(roll);
+    const s = Math.sin(roll);
+    const t2 = [t[0] * c + b[0] * s, t[1] * c + b[1] * s, t[2] * c + b[2] * s];
+    const b2 = [b[0] * c - t[0] * s, b[1] * c - t[1] * s, b[2] * c - t[2] * s];
+    t = t2;
+    b = b2;
+  }
+  return [t, b, n];
 }
 
 /** Ellipsoid whose local +Z is aligned to `normal`, rigidly bound to one joint. */
-function addOrientedEllipsoid(mesh, center, radii, normal, color, joint, segments = 28, rings = 18) {
+function addOrientedEllipsoid(mesh, center, radii, normal, color, joint, opts = {}) {
+  const { segments = 26, rings = 17, roll = 0 } = opts;
   const n = normalize(normal);
-  const [tx, ty, tz] = orthonormalBasis(n);
+  const [tx, ty, tz] = orthonormalBasis(n, roll);
   const base = mesh.positions.length / 3;
 
   for (let i = 0; i <= rings; i++) {
@@ -346,8 +382,8 @@ function addOrientedEllipsoid(mesh, center, radii, normal, color, joint, segment
 }
 
 /**
- * Places a feature on the head ellipsoid given a direction in normalised
- * ellipsoid space, returning both the surface point and the true outward normal.
+ * Places a feature on the head ellipsoid from a direction in normalised
+ * ellipsoid space, returning the surface point and the true outward normal.
  */
 function headSurface(dir, sideSign = 1) {
   const { c, r } = ANATOMY.head;
@@ -357,60 +393,63 @@ function headSurface(dir, sideSign = 1) {
   return { point, normal };
 }
 
+const offsetAlong = (p, n, d) => [p[0] + n[0] * d, p[1] + n[1] * d, p[2] + n[2] * d];
+
 function addFace(mesh) {
   const head = BONE_INDEX.head;
 
   for (const s of MIRROR) {
-    // Eye: a dark dome sunk slightly into the skull, with a specular dot.
-    const eye = headSurface([0.452, 0.181, 0.874], s);
-    const eyeCenter = [
-      eye.point[0] - eye.normal[0] * 0.026,
-      eye.point[1] - eye.normal[1] * 0.026,
-      eye.point[2] - eye.normal[2] * 0.026,
-    ];
-    addOrientedEllipsoid(mesh, eyeCenter, [0.055, 0.058, 0.055], eye.normal, DARK, head);
+    // Eye: a large dark dome, set slightly into the skull.
+    const eye = headSurface([0.430, 0.150, 0.890], s);
+    const eyeCenter = offsetAlong(eye.point, eye.normal, -0.030);
+    addOrientedEllipsoid(mesh, eyeCenter, [0.064, 0.068, 0.062], eye.normal, DARK, head);
 
+    // Highlight, up and towards the nose, as on the reference model.
     const [bx, by] = orthonormalBasis(eye.normal);
     const glint = [
-      eyeCenter[0] + eye.normal[0] * 0.048 + bx[0] * 0.016 * s + by[0] * 0.018,
-      eyeCenter[1] + eye.normal[1] * 0.048 + bx[1] * 0.016 * s + by[1] * 0.018,
-      eyeCenter[2] + eye.normal[2] * 0.048 + bx[2] * 0.016 * s + by[2] * 0.018,
+      eyeCenter[0] + eye.normal[0] * 0.052 - bx[0] * 0.020 * s + by[0] * 0.024,
+      eyeCenter[1] + eye.normal[1] * 0.052 - bx[1] * 0.020 * s + by[1] * 0.024,
+      eyeCenter[2] + eye.normal[2] * 0.052 - bx[2] * 0.020 * s + by[2] * 0.024,
     ];
-    addOrientedEllipsoid(mesh, glint, [0.019, 0.019, 0.012], eye.normal, WHITE, head, 16, 10);
+    addOrientedEllipsoid(mesh, glint, [0.024, 0.024, 0.014], eye.normal, WHITE, head, { segments: 16, rings: 11 });
 
-    // Cheek pouch: a flat red disc lying on the skull.
-    const cheek = headSurface([0.857, -0.299, 0.419], s);
-    const cheekCenter = [
-      cheek.point[0] + cheek.normal[0] * 0.004,
-      cheek.point[1] + cheek.normal[1] * 0.004,
-      cheek.point[2] + cheek.normal[2] * 0.004,
-    ];
-    addOrientedEllipsoid(mesh, cheekCenter, [0.079, 0.079, 0.028], cheek.normal, RED, head);
+    // Cheek pouch: a large flat red disc lying on the skull. Angled forward
+    // rather than straight out to the side, or it falls off the silhouette.
+    const cheek = headSurface([0.660, -0.255, 0.706], s);
+    const cheekCenter = offsetAlong(cheek.point, cheek.normal, 0.004);
+    addOrientedEllipsoid(mesh, cheekCenter, [0.090, 0.090, 0.030], cheek.normal, RED, head);
   }
 
-  const nose = headSurface([0, 0.02, 1]);
-  addOrientedEllipsoid(mesh, nose.point, [0.019, 0.014, 0.014], nose.normal, DARK, head, 16, 12);
+  const nose = headSurface([0, 0.030, 1]);
+  addOrientedEllipsoid(mesh, nose.point, [0.021, 0.015, 0.014], nose.normal, DARK, head, { segments: 16, rings: 12 });
 
-  const mouth = headSurface([0, -0.319, 0.948]);
-  const mouthCenter = [
-    mouth.point[0] - mouth.normal[0] * 0.012,
-    mouth.point[1] - mouth.normal[1] * 0.012,
-    mouth.point[2] - mouth.normal[2] * 0.012,
-  ];
-  addOrientedEllipsoid(mesh, mouthCenter, [0.042, 0.028, 0.026], mouth.normal, DARK, head, 24, 16);
+  // Mouth: open interior, tongue, and the two angled strokes of the upper lip
+  // that give the character its signature expression.
+  const mouth = headSurface([0, -0.360, 0.930]);
+  const mouthCenter = offsetAlong(mouth.point, mouth.normal, -0.014);
+  addOrientedEllipsoid(mesh, mouthCenter, [0.050, 0.032, 0.028], mouth.normal, DARK, head);
   addOrientedEllipsoid(
     mesh,
-    [
-      mouthCenter[0] - mouth.normal[0] * 0.003,
-      mouthCenter[1] - mouth.normal[1] * 0.003 - 0.009,
-      mouthCenter[2] - mouth.normal[2] * 0.003,
-    ],
-    [0.026, 0.014, 0.020], mouth.normal, TONGUE, head, 20, 12,
+    [mouthCenter[0], mouthCenter[1] - 0.012, mouthCenter[2] - mouth.normal[2] * 0.003],
+    [0.030, 0.015, 0.022], mouth.normal, TONGUE, head, { segments: 20, rings: 12 },
   );
+
+  const [lipT, lipB] = orthonormalBasis(mouth.normal);
+  for (const s of MIRROR) {
+    const anchor = [
+      mouthCenter[0] + lipT[0] * 0.040 * s + lipB[0] * 0.030 + mouth.normal[0] * 0.012,
+      mouthCenter[1] + lipT[1] * 0.040 * s + lipB[1] * 0.030 + mouth.normal[1] * 0.012,
+      mouthCenter[2] + lipT[2] * 0.040 * s + lipB[2] * 0.030 + mouth.normal[2] * 0.012,
+    ];
+    addOrientedEllipsoid(
+      mesh, anchor, [0.040, 0.007, 0.009], mouth.normal, DARK, head,
+      { segments: 14, rings: 8, roll: s * 0.42 },
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Animation. Poses are analytic; keyframes are just samples of them.
+// Animation. Poses are analytic; keyframes are samples of them.
 // ---------------------------------------------------------------------------
 
 const TAU = Math.PI * 2;
@@ -425,27 +464,25 @@ function idlePose(u) {
   const p = u * TAU;
   const breathe = Math.sin(p * 2);
   const pose = {
-    hips: { euler: [0, 0, 0], offset: [0, 0.007 * breathe, 0] },
-    spine: { euler: [0.018 * breathe, 0, 0] },
-    chest: { euler: [0.016 * breathe, 0, 0] },
-    head: { euler: [0.028 * Math.sin(p * 2 + 0.5), 0.07 * Math.sin(p), 0] },
+    hips: { euler: [0, 0, 0], offset: [0, 0.008 * breathe, 0] },
+    spine: { euler: [0.020 * breathe, 0, 0] },
+    chest: { euler: [0.018 * breathe, 0, 0] },
+    head: { euler: [0.030 * Math.sin(p * 2 + 0.5), 0.075 * Math.sin(p), 0] },
   };
-  applyMirrored(pose, 'ear', [0.06 * Math.sin(p + 0.3), 0, -0.12 + 0.1 * Math.sin(p)]);
-  applyMirrored(pose, 'earTip', [0, 0, 0.16 * Math.sin(p + 0.9)]);
-  applyMirrored(pose, 'arm', [0.05 * Math.sin(p), 0, -0.07 + 0.05 * Math.sin(p + 0.4)]);
+  // Ears lag the head and settle late, which is what sells them as soft.
+  applyMirrored(pose, 'ear', [0.07 * Math.sin(p + 0.3), 0, -0.10 + 0.11 * Math.sin(p)]);
+  applyMirrored(pose, 'earTip', [0, 0, 0.18 * Math.sin(p + 0.95)]);
+  applyMirrored(pose, 'arm', [0.05 * Math.sin(p), 0, -0.08 + 0.05 * Math.sin(p + 0.4)]);
   for (let i = 0; i < 4; i++) {
-    pose[`tail${i + 1}`] = { euler: [0.03 * Math.sin(p + i * 0.5), 0.11 * Math.sin(p + i * 0.6), 0] };
+    pose[`tail${i + 1}`] = { euler: [0.03 * Math.sin(p + i * 0.5), 0.12 * Math.sin(p + i * 0.6), 0] };
   }
   return pose;
 }
 
-function strideePose(u, { swing, armSwing, lean, bob, earBounce, tailSway }) {
+function stridePose(u, { swing, armSwing, lean, bob, earBounce, tailSway }) {
   const p = u * TAU;
   const pose = {
-    hips: {
-      euler: [0, 0.07 * Math.sin(p), 0],
-      offset: [0, bob * Math.sin(p * 2), 0],
-    },
+    hips: { euler: [0, 0.07 * Math.sin(p), 0], offset: [0, bob * Math.sin(p * 2), 0] },
     spine: { euler: [lean, 0, 0] },
     chest: { euler: [lean * 0.5, -0.06 * Math.sin(p), 0] },
     head: { euler: [-lean * 0.9, 0.05 * Math.sin(p), 0] },
@@ -456,11 +493,11 @@ function strideePose(u, { swing, armSwing, lean, bob, earBounce, tailSway }) {
   pose['foot.L'] = { euler: [0.12 + 0.3 * Math.sin(p - 0.7), 0, 0] };
   pose['foot.R'] = { euler: [0.12 + 0.3 * Math.sin(p + Math.PI - 0.7), 0, 0] };
 
-  pose['arm.L'] = { euler: [-armSwing * Math.sin(p + Math.PI), 0, -0.12] };
-  pose['arm.R'] = { euler: [-armSwing * Math.sin(p), 0, 0.12] };
+  pose['arm.L'] = { euler: [-armSwing * Math.sin(p + Math.PI), 0, -0.14] };
+  pose['arm.R'] = { euler: [-armSwing * Math.sin(p), 0, 0.14] };
 
-  applyMirrored(pose, 'ear', [-0.1 + earBounce * Math.sin(p * 2 + 0.4), 0, -0.16]);
-  applyMirrored(pose, 'earTip', [earBounce * 1.4 * Math.sin(p * 2 + 1.1), 0, 0]);
+  applyMirrored(pose, 'ear', [-0.10 + earBounce * Math.sin(p * 2 + 0.4), 0, -0.16]);
+  applyMirrored(pose, 'earTip', [earBounce * 1.5 * Math.sin(p * 2 + 1.1), 0, 0]);
 
   for (let i = 0; i < 4; i++) {
     pose[`tail${i + 1}`] = {
@@ -470,16 +507,15 @@ function strideePose(u, { swing, armSwing, lean, bob, earBounce, tailSway }) {
   return pose;
 }
 
-const walkPose = (u) => strideePose(u, {
-  swing: 0.6, armSwing: 0.42, lean: 0.06, bob: 0.016, earBounce: 0.09, tailSway: 0.13,
+const walkPose = (u) => stridePose(u, {
+  swing: 0.60, armSwing: 0.42, lean: 0.06, bob: 0.016, earBounce: 0.10, tailSway: 0.14,
 });
 
-const runPose = (u) => strideePose(u, {
-  swing: 0.95, armSwing: 0.75, lean: 0.26, bob: 0.032, earBounce: 0.16, tailSway: 0.2,
+const runPose = (u) => stridePose(u, {
+  swing: 0.98, armSwing: 0.78, lean: 0.28, bob: 0.034, earBounce: 0.18, tailSway: 0.22,
 });
 
 function jumpPose(u) {
-  // crouch -> extend -> tuck -> absorb
   const crouch = smoothstep(0.0, 0.16, u) * (1 - smoothstep(0.16, 0.3, u));
   const extend = smoothstep(0.18, 0.34, u) * (1 - smoothstep(0.55, 0.78, u));
   const land = smoothstep(0.78, 0.88, u) * (1 - smoothstep(0.88, 1.0, u));
@@ -487,10 +523,10 @@ function jumpPose(u) {
 
   const squash = crouch * 0.9 + land * 0.7;
   const pose = {
-    hips: { euler: [0, 0, 0], offset: [0, -0.075 * squash, 0] },
+    hips: { euler: [0, 0, 0], offset: [0, -0.078 * squash, 0] },
     spine: { euler: [0.28 * squash - 0.18 * extend, 0, 0] },
-    chest: { euler: [0.12 * squash - 0.1 * extend, 0, 0] },
-    head: { euler: [-0.2 * squash + 0.16 * extend, 0, 0] },
+    chest: { euler: [0.12 * squash - 0.10 * extend, 0, 0] },
+    head: { euler: [-0.20 * squash + 0.16 * extend, 0, 0] },
   };
 
   const legBend = 0.95 * squash - 0.25 * extend + 1.15 * tuck;
@@ -499,12 +535,35 @@ function jumpPose(u) {
   pose['foot.L'] = { euler: [-0.5 * legBend + 0.35 * extend, 0, 0] };
   pose['foot.R'] = { euler: [-0.5 * legBend + 0.35 * extend, 0, 0] };
 
-  applyMirrored(pose, 'arm', [-1.5 * extend + 0.5 * squash, 0, -0.2 - 0.3 * extend]);
-  applyMirrored(pose, 'ear', [0.45 * squash - 0.5 * extend, 0, -0.14]);
-  applyMirrored(pose, 'earTip', [0.5 * squash - 0.7 * extend, 0, 0]);
+  applyMirrored(pose, 'arm', [-1.5 * extend + 0.5 * squash, 0, -0.22 - 0.30 * extend]);
+  applyMirrored(pose, 'ear', [0.45 * squash - 0.55 * extend, 0, -0.14]);
+  applyMirrored(pose, 'earTip', [0.55 * squash - 0.75 * extend, 0, 0]);
 
   for (let i = 0; i < 4; i++) {
-    pose[`tail${i + 1}`] = { euler: [-0.25 * extend + 0.2 * squash, 0.05 * Math.sin(u * TAU + i), 0] };
+    pose[`tail${i + 1}`] = { euler: [-0.25 * extend + 0.20 * squash, 0.05 * Math.sin(u * TAU + i), 0] };
+  }
+  return pose;
+}
+
+/** Played on pickup: a quick bounce with the ears thrown up. */
+function cheerPose(u) {
+  const rise = smoothstep(0.0, 0.22, u) * (1 - smoothstep(0.62, 1.0, u));
+  const dip = smoothstep(0.0, 0.10, u) * (1 - smoothstep(0.10, 0.30, u));
+  const p = u * TAU;
+
+  const pose = {
+    hips: { euler: [0, 0, 0], offset: [0, 0.085 * rise - 0.045 * dip, 0] },
+    spine: { euler: [-0.16 * rise + 0.20 * dip, 0, 0] },
+    chest: { euler: [-0.10 * rise, 0, 0] },
+    head: { euler: [-0.22 * rise + 0.10 * dip, 0.10 * Math.sin(p * 2), 0] },
+  };
+  applyMirrored(pose, 'arm', [-1.9 * rise + 0.4 * dip, 0, -0.30 - 0.35 * rise]);
+  applyMirrored(pose, 'ear', [-0.35 * rise + 0.30 * dip, 0, -0.06]);
+  applyMirrored(pose, 'earTip', [-0.45 * rise, 0, 0.20 * Math.sin(p * 2)]);
+  pose['leg.L'] = { euler: [0.55 * rise + 0.7 * dip, 0, 0] };
+  pose['leg.R'] = { euler: [0.55 * rise + 0.7 * dip, 0, 0] };
+  for (let i = 0; i < 4; i++) {
+    pose[`tail${i + 1}`] = { euler: [-0.30 * rise, 0.16 * Math.sin(p * 2 + i * 0.5), 0] };
   }
   return pose;
 }
@@ -514,6 +573,7 @@ const CLIPS = [
   { name: 'walk', duration: 0.85, fps: 26, pose: walkPose },
   { name: 'run', duration: 0.52, fps: 30, pose: runPose },
   { name: 'jump', duration: 0.95, fps: 30, pose: jumpPose, loop: false },
+  { name: 'cheer', duration: 0.80, fps: 30, pose: cheerPose, loop: false },
 ];
 
 function eulerToQuat([x, y, z]) {
@@ -534,16 +594,14 @@ function eulerToQuat([x, y, z]) {
 function main() {
   const started = Date.now();
   // 150 samples puts the cell size around 9mm on a 1.2m character, which
-  // resolves the ear taper and the tail notches without spending 100k triangles
-  // on a model that is usually a few hundred pixels tall.
+  // resolves the ear taper, toes and tail notches without spending 100k
+  // triangles on a model that is usually a few hundred pixels tall.
   const resolution = Number(process.env.CHAR_RES || 150);
 
   console.log(`[character] meshing implicit surface at ${resolution} samples/longest axis`);
   const bounds = { min: [-0.40, -0.04, -0.70], max: [0.40, 1.28, 0.34] };
   const surface = surfaceNets(shape, { ...bounds, resolution });
-  console.log(
-    `[character] surface: ${surface.positions.length / 3} verts, ${surface.indices.length / 3} tris`,
-  );
+  console.log(`[character] surface: ${surface.positions.length / 3} verts, ${surface.indices.length / 3} tris`);
 
   const mesh = createMesh();
   for (let i = 0; i < surface.positions.length; i += 3) {
@@ -564,17 +622,16 @@ function main() {
   addFace(mesh);
   console.log(`[character] with face features: ${mesh.positions.length / 3} verts, ${mesh.indices.length / 3} tris`);
 
-  // ---- assemble glTF
   const gltf = new GLTFBuilder();
 
   const positions = new Float32Array(mesh.positions);
   const normals = new Float32Array(mesh.normals);
-  const colors = new Uint8Array(mesh.colors.map((c) => Math.round(clamp(srgbToLinear(c), 0, 1) * 255)));
-  const colors4 = new Uint8Array((colors.length / 3) * 4);
-  for (let i = 0, j = 0; i < colors.length; i += 3, j += 4) {
-    colors4[j] = colors[i];
-    colors4[j + 1] = colors[i + 1];
-    colors4[j + 2] = colors[i + 2];
+  const linear = mesh.colors.map((c) => Math.round(clamp(srgbToLinear(c), 0, 1) * 255));
+  const colors4 = new Uint8Array((linear.length / 3) * 4);
+  for (let i = 0, j = 0; i < linear.length; i += 3, j += 4) {
+    colors4[j] = linear[i];
+    colors4[j + 1] = linear[i + 1];
+    colors4[j + 2] = linear[i + 2];
     colors4[j + 3] = 255;
   }
   const joints = new Uint8Array(mesh.joints);
@@ -586,7 +643,7 @@ function main() {
     pbrMetallicRoughness: {
       baseColorFactor: [1, 1, 1, 1],
       metallicFactor: 0.0,
-      roughnessFactor: 0.72,
+      roughnessFactor: 0.62,
     },
   });
 
@@ -605,7 +662,6 @@ function main() {
     }],
   });
 
-  // Bone nodes. Local translation is the offset from the parent's rest position.
   const nodeOf = BONES.map(() => 0);
   BONES.forEach((bone, i) => {
     const parentPos = bone.parent >= 0 ? BONES[bone.parent].pos : [0, 0, 0];
@@ -629,8 +685,7 @@ function main() {
   // translation (column-major, per the glTF convention).
   const ibm = new Float32Array(BONES.length * 16);
   BONES.forEach((bone, i) => {
-    const m = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -bone.pos[0], -bone.pos[1], -bone.pos[2], 1];
-    ibm.set(m, i * 16);
+    ibm.set([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -bone.pos[0], -bone.pos[1], -bone.pos[2], 1], i * 16);
   });
 
   const skin = gltf.addSkin({
@@ -644,7 +699,6 @@ function main() {
   gltf.addSceneNode(nodeOf[0]);
   gltf.addSceneNode(meshNode);
 
-  // ---- animations
   for (const clip of CLIPS) {
     const frameCount = Math.max(2, Math.round(clip.duration * clip.fps) + 1);
     const times = new Float32Array(frameCount);
