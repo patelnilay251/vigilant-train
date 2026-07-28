@@ -1,10 +1,8 @@
 name: Deploy to GitHub Pages
 
-# Manual dispatch and the default branch only, so nothing publishes by accident
-# from a working branch.
 on:
   push:
-    branches: [main]
+    branches: [main, claude/hello-3bpgwp]
   workflow_dispatch:
 
 permissions:
