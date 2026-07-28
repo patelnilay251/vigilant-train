@@ -34,9 +34,11 @@ jobs:
       - name: Build assets
         run: npm run build:assets
 
+      # Pages must already be switched on for the repository, with its source
+      # set to GitHub Actions (Settings -> Pages). The `enablement: true` option
+      # cannot do it for you: creating a Pages site needs repo-admin rights, and
+      # the default GITHUB_TOKEN does not have them.
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - uses: actions/upload-pages-artifact@v3
         with:
