@@ -74,8 +74,18 @@ async function loadAssets(progress) {
     fetchTyped('rocks.bin', Float32Array, 'placing stones', progress),
   ]);
   progress('waking the traveller');
-  const gltf = await new GLTFLoader().loadAsync(asset('character.glb'));
-  return { manifest, heights, ao, trees, rocks, gltf };
+  const [gltf, face] = await Promise.all([
+    new GLTFLoader().loadAsync(asset('character.glb')),
+    new THREE.TextureLoader().loadAsync(asset('face.png')),
+  ]);
+
+  face.colorSpace = THREE.SRGBColorSpace;
+  // glTF puts v = 0 at the top of the image; TextureLoader assumes the
+  // opposite, so without this the face arrives upside down.
+  face.flipY = false;
+  face.anisotropy = 4;
+
+  return { manifest, heights, ao, trees, rocks, gltf, face };
 }
 
 async function boot() {
@@ -89,7 +99,7 @@ async function boot() {
   };
 
   hud.progress(0.05, 'reading the map');
-  const { manifest, heights, ao, trees, rocks, gltf } = await loadAssets(progress);
+  const { manifest, heights, ao, trees, rocks, gltf, face } = await loadAssets(progress);
 
   const renderer = new THREE.WebGLRenderer({ antialias: !quality.lean, powerPreference: 'high-performance' });
   renderer.setPixelRatio(quality.pixelRatio);
@@ -150,6 +160,15 @@ async function boot() {
   await settle();
 
   const player = new Player(gltf, field);
+  // The face is painted rather than modelled. Vertex colours carry the body as
+  // multipliers against the skin, and this supplies the absolute colour, so the
+  // two multiply together into the finished character.
+  player.model.traverse((node) => {
+    if (node.isMesh || node.isSkinnedMesh) {
+      node.material.map = face;
+      node.material.needsUpdate = true;
+    }
+  });
   scene.add(player.root);
 
   const rig = new ThirdPersonCamera(camera, field);

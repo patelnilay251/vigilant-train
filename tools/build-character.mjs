@@ -17,6 +17,7 @@ import {
   smin, sdSphere, sdEllipsoid, sdRoundCone, sdSegmentBox2D, extrudeX,
   distanceToSegment, clamp, smoothstep,
 } from './lib/sdf.mjs';
+import { FACE_PROJECTION, SKIN, faceUV } from './lib/face-layout.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = path.resolve(__dirname, '../web/assets');
@@ -26,15 +27,20 @@ const OUT_DIR = path.resolve(__dirname, '../web/assets');
 // vertex colours are linear.
 // ---------------------------------------------------------------------------
 
-const YELLOW = [1.000, 0.800, 0.090];
-const BROWN = [0.451, 0.259, 0.110];   // back stripes, tail base
-const EAR_TIP = [0.157, 0.110, 0.078]; // near-black, not the stripe brown
-const DARK = [0.086, 0.071, 0.067];
-const RED = [0.898, 0.157, 0.086];
-const WHITE = [1.0, 1.0, 1.0];
-const TONGUE = [0.784, 0.310, 0.353];
-
 const srgbToLinear = (c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+
+// Vertex colours are multipliers against the skin rather than absolute colours:
+// the face arrives as a texture carrying absolute colour, and the two combine by
+// multiplication. Expressing the body this way means skin is plain white and
+// needs no special case, and the edge of the textured region cannot show a seam
+// because both sides resolve to the same value.
+const SKIN_LINEAR = SKIN.map(srgbToLinear);
+const asSkinMultiplier = (target) =>
+  target.map((c, i) => clamp(srgbToLinear(c) / SKIN_LINEAR[i], 0, 1));
+
+const SKIN_TONE = [1, 1, 1];
+const BROWN = asSkinMultiplier([0.451, 0.259, 0.110]);   // back stripes, tail base
+const EAR_TIP = asSkinMultiplier([0.157, 0.110, 0.078]); // near-black
 
 // ---------------------------------------------------------------------------
 // Anatomy. +Y up, +Z forward. ~1.19 units from floor to ear tip.
@@ -217,7 +223,7 @@ function surfaceColor(x, y, z) {
     const tz = Math.sin(A.tail.yaw) * x + Math.cos(A.tail.yaw) * z;
     // Brown only on the short stalk where the tail leaves the body.
     if (sdSegmentBox2D(tz, y, az, ay, bz, by, A.tail.widths[0] + 0.014) < 0.0) return BROWN;
-    return YELLOW;
+    return SKIN_TONE;
   }
 
   // Two bands across the back of the torso.
@@ -225,7 +231,7 @@ function surfaceColor(x, y, z) {
     if ((y > 0.315 && y < 0.383) || (y > 0.429 && y < 0.491)) return BROWN;
   }
 
-  return YELLOW;
+  return SKIN_TONE;
 }
 
 // ---------------------------------------------------------------------------
@@ -349,7 +355,7 @@ function skinWeights(x, y, z) {
 // ---------------------------------------------------------------------------
 
 function createMesh() {
-  return { positions: [], normals: [], colors: [], joints: [], weights: [], indices: [] };
+  return { positions: [], normals: [], colors: [], uvs: [], joints: [], weights: [], indices: [] };
 }
 
 const cross = (a, b) => [
@@ -360,162 +366,6 @@ const cross = (a, b) => [
 function normalize(v) {
   const l = Math.hypot(v[0], v[1], v[2]);
   return l < 1e-12 ? [0, 1, 0] : [v[0] / l, v[1] / l, v[2] / l];
-}
-
-/** Tangent frame around `n`, optionally spun by `roll` radians about it. */
-function orthonormalBasis(n, roll = 0) {
-  const up = Math.abs(n[1]) > 0.95 ? [1, 0, 0] : [0, 1, 0];
-  let t = normalize(cross(up, n));
-  let b = cross(n, t);
-  if (roll !== 0) {
-    const c = Math.cos(roll);
-    const s = Math.sin(roll);
-    const t2 = [t[0] * c + b[0] * s, t[1] * c + b[1] * s, t[2] * c + b[2] * s];
-    const b2 = [b[0] * c - t[0] * s, b[1] * c - t[1] * s, b[2] * c - t[2] * s];
-    t = t2;
-    b = b2;
-  }
-  return [t, b, n];
-}
-
-/** Ellipsoid whose local +Z is aligned to `normal`, rigidly bound to one joint. */
-function addOrientedEllipsoid(mesh, center, radii, normal, color, joint, opts = {}) {
-  const { segments = 26, rings = 17, roll = 0 } = opts;
-  const n = normalize(normal);
-  const [tx, ty, tz] = orthonormalBasis(n, roll);
-  const base = mesh.positions.length / 3;
-
-  for (let i = 0; i <= rings; i++) {
-    const phi = (i / rings) * Math.PI;
-    const sinPhi = Math.sin(phi);
-    const cosPhi = Math.cos(phi);
-    for (let j = 0; j <= segments; j++) {
-      const theta = (j / segments) * Math.PI * 2;
-      const lx = sinPhi * Math.cos(theta);
-      const ly = sinPhi * Math.sin(theta);
-      const lz = cosPhi;
-
-      const sx = lx * radii[0];
-      const sy = ly * radii[1];
-      const sz = lz * radii[2];
-      mesh.positions.push(
-        center[0] + tx[0] * sx + ty[0] * sy + tz[0] * sz,
-        center[1] + tx[1] * sx + ty[1] * sy + tz[1] * sz,
-        center[2] + tx[2] * sx + ty[2] * sy + tz[2] * sz,
-      );
-
-      const g = normalize([lx / radii[0], ly / radii[1], lz / radii[2]]);
-      mesh.normals.push(
-        tx[0] * g[0] + ty[0] * g[1] + tz[0] * g[2],
-        tx[1] * g[0] + ty[1] * g[1] + tz[1] * g[2],
-        tx[2] * g[0] + ty[2] * g[1] + tz[2] * g[2],
-      );
-
-      mesh.colors.push(color[0], color[1], color[2]);
-      mesh.joints.push(joint, 0, 0, 0);
-      mesh.weights.push(1, 0, 0, 0);
-    }
-  }
-
-  const stride = segments + 1;
-  for (let i = 0; i < rings; i++) {
-    for (let j = 0; j < segments; j++) {
-      const a = base + i * stride + j;
-      const b = a + stride;
-      mesh.indices.push(a, b, a + 1, a + 1, b, b + 1);
-    }
-  }
-}
-
-/**
- * Places a feature on the head ellipsoid from a direction in normalised
- * ellipsoid space, returning the surface point and the true outward normal.
- */
-function headSurface(dir, sideSign = 1) {
-  const { c, r } = ANATOMY.head;
-  const u = normalize([dir[0] * sideSign, dir[1], dir[2]]);
-  const guess = [c[0] + r[0] * u[0], c[1] + r[1] * u[1], c[2] + r[2] * u[2]];
-  const normal = normalize([u[0] / r[0], u[1] / r[1], u[2] / r[2]]);
-  return { point: projectToSurface(guess, normal), normal };
-}
-
-const offsetAlong = (p, n, d) => [p[0] + n[0] * d, p[1] + n[1] * d, p[2] + n[2] * d];
-
-/**
- * Walks a point onto the real isosurface along `normal`.
- *
- * headSurface() solves against the bare head ellipsoid, but the shape the
- * mesher sees also has the cheek masses blended into it, so the true surface
- * sits measurably further out around the jaw. Placing face features against the
- * ellipsoid buries them; this puts them where the skin actually is.
- */
-function projectToSurface(point, normal, iterations = 12) {
-  let [px, py, pz] = point;
-  for (let i = 0; i < iterations; i++) {
-    const d = shape(px, py, pz);
-    if (!Number.isFinite(d) || Math.abs(d) < 1e-5) break;
-    px -= normal[0] * d;
-    py -= normal[1] * d;
-    pz -= normal[2] * d;
-  }
-  return [px, py, pz];
-}
-
-function addFace(mesh) {
-  const head = BONE_INDEX.head;
-
-  for (const s of MIRROR) {
-    // Eye: a large dark dome, set slightly into the skull.
-    // Large, and slightly taller than wide, as in the reference.
-    const eye = headSurface([0.428, 0.180, 0.886], s);
-    const eyeCenter = offsetAlong(eye.point, eye.normal, -0.030);
-    addOrientedEllipsoid(mesh, eyeCenter, [0.070, 0.080, 0.066], eye.normal, DARK, head);
-
-    // Highlight, up and towards the nose, as on the reference model.
-    const [bx, by] = orthonormalBasis(eye.normal);
-    const glint = [
-      eyeCenter[0] + eye.normal[0] * 0.052 - bx[0] * 0.020 * s + by[0] * 0.024,
-      eyeCenter[1] + eye.normal[1] * 0.052 - bx[1] * 0.020 * s + by[1] * 0.024,
-      eyeCenter[2] + eye.normal[2] * 0.052 - bx[2] * 0.020 * s + by[2] * 0.024,
-    ];
-    addOrientedEllipsoid(mesh, glint, [0.024, 0.024, 0.014], eye.normal, WHITE, head, { segments: 16, rings: 11 });
-
-    // Cheek pouch: a large flat red disc lying on the skull. Angled forward
-    // rather than straight out to the side, or it falls off the silhouette.
-    // A shallow dome, not a flat disc. On a head this curved a flat disc buries
-    // its own edge in the skull and only its rim surfaces, which reads as a red
-    // crescent rather than a cheek pouch.
-    const cheek = headSurface([0.618, -0.330, 0.713], s);
-    const cheekCenter = offsetAlong(cheek.point, cheek.normal, -0.028);
-    addOrientedEllipsoid(mesh, cheekCenter, [0.086, 0.086, 0.043], cheek.normal, RED, head);
-  }
-
-  const nose = headSurface([0, 0.030, 1]);
-  addOrientedEllipsoid(mesh, nose.point, [0.021, 0.015, 0.014], nose.normal, DARK, head, { segments: 16, rings: 12 });
-
-  // Mouth: open interior, tongue, and the two angled strokes of the upper lip
-  // that give the character its signature expression.
-  const mouth = headSurface([0, -0.360, 0.930]);
-  const mouthCenter = offsetAlong(mouth.point, mouth.normal, -0.016);
-  addOrientedEllipsoid(mesh, mouthCenter, [0.062, 0.046, 0.034], mouth.normal, DARK, head);
-  addOrientedEllipsoid(
-    mesh,
-    [mouthCenter[0], mouthCenter[1] - 0.018, mouthCenter[2] - mouth.normal[2] * 0.003],
-    [0.040, 0.021, 0.026], mouth.normal, TONGUE, head, { segments: 20, rings: 12 },
-  );
-
-  const [lipT, lipB] = orthonormalBasis(mouth.normal);
-  for (const s of MIRROR) {
-    const anchor = [
-      mouthCenter[0] + lipT[0] * 0.040 * s + lipB[0] * 0.030 + mouth.normal[0] * 0.012,
-      mouthCenter[1] + lipT[1] * 0.040 * s + lipB[1] * 0.030 + mouth.normal[1] * 0.012,
-      mouthCenter[2] + lipT[2] * 0.040 * s + lipB[2] * 0.030 + mouth.normal[2] * 0.012,
-    ];
-    addOrientedEllipsoid(
-      mesh, anchor, [0.040, 0.007, 0.009], mouth.normal, DARK, head,
-      { segments: 14, rings: 8, roll: s * 0.42 },
-    );
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -682,6 +532,11 @@ function main() {
     mesh.normals.push(surface.normals[i], surface.normals[i + 1], surface.normals[i + 2]);
     const c = surfaceColor(x, y, z);
     mesh.colors.push(c[0], c[1], c[2]);
+    // Anything off the face — back of the head, ears, body, tail — is sent to a
+    // corner of the texture that is plain skin, so one material covers the
+    // whole character.
+    const uv = faceUV(x, y, z, ANATOMY.head.c, ANATOMY.head.r) || FACE_PROJECTION.restUV;
+    mesh.uvs.push(uv[0], uv[1]);
     const { joints, weights } = skinWeights(x, y, z);
     mesh.joints.push(...joints);
     mesh.weights.push(...weights);
@@ -689,14 +544,12 @@ function main() {
   // Spreading here would overflow the call stack at this element count.
   for (let i = 0; i < surface.indices.length; i++) mesh.indices.push(surface.indices[i]);
 
-  addFace(mesh);
-  console.log(`[character] with face features: ${mesh.positions.length / 3} verts, ${mesh.indices.length / 3} tris`);
-
   const gltf = new GLTFBuilder();
 
   const positions = new Float32Array(mesh.positions);
   const normals = new Float32Array(mesh.normals);
-  const linear = mesh.colors.map((c) => Math.round(clamp(srgbToLinear(c), 0, 1) * 255));
+  // Already linear multipliers; no colour-space conversion here.
+  const linear = mesh.colors.map((c) => Math.round(clamp(c, 0, 1) * 255));
   const colors4 = new Uint8Array((linear.length / 3) * 4);
   for (let i = 0, j = 0; i < linear.length; i += 3, j += 4) {
     colors4[j] = linear[i];
@@ -724,6 +577,7 @@ function main() {
         POSITION: gltf.addVertexAccessor(positions, 'VEC3', { computeBounds: true }),
         NORMAL: gltf.addVertexAccessor(normals, 'VEC3'),
         COLOR_0: gltf.addVertexAccessor(colors4, 'VEC4', { normalized: true }),
+        TEXCOORD_0: gltf.addVertexAccessor(new Float32Array(mesh.uvs), 'VEC2'),
         JOINTS_0: gltf.addVertexAccessor(joints, 'VEC4'),
         WEIGHTS_0: gltf.addVertexAccessor(weights, 'VEC4'),
       },
