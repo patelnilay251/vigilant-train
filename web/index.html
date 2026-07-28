@@ -299,14 +299,16 @@ body.touch #help { display: none; }
   <div class="sub" id="loader-sub">starting…</div>
 </div>
 
+<!-- Relative specifiers, so the site works when hosted under a subpath
+     (project pages, preview URLs) as well as at a domain root. -->
 <script type="importmap">
 {
   "imports": {
-    "three": "/vendor/three/build/three.module.js",
-    "three/addons/": "/vendor/three/examples/jsm/"
+    "three": "./vendor/three/build/three.module.js",
+    "three/addons/": "./vendor/three/examples/jsm/"
   }
 }
 </script>
-<script type="module" src="/src/main.js"></script>
+<script type="module" src="./src/main.js"></script>
 </body>
 </html>

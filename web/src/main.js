@@ -49,23 +49,28 @@ function pickQuality() {
     };
 }
 
-async function fetchTyped(url, Type, label, progress) {
+// Resolved against this module rather than the document, so the app works
+// unchanged at a domain root, under a project subpath, or from a preview URL.
+const asset = (name) => new URL(`../assets/${name}`, import.meta.url).href;
+
+async function fetchTyped(name, Type, label, progress) {
   progress(label);
+  const url = asset(name);
   const response = await fetch(url);
-  if (!response.ok) throw new Error(`${url} -> ${response.status}`);
+  if (!response.ok) throw new Error(`${name} -> ${response.status}`);
   return new Type(await response.arrayBuffer());
 }
 
 async function loadAssets(progress) {
-  const manifest = await (await fetch('/assets/world.json')).json();
+  const manifest = await (await fetch(asset('world.json'))).json();
   const [heights, ao, trees, rocks] = await Promise.all([
-    fetchTyped('/assets/heightmap.bin', Float32Array, 'shaping the land', progress),
-    fetchTyped('/assets/ao.bin', Uint8Array, 'settling the light', progress),
-    fetchTyped('/assets/trees.bin', Float32Array, 'growing the woods', progress),
-    fetchTyped('/assets/rocks.bin', Float32Array, 'placing stones', progress),
+    fetchTyped('heightmap.bin', Float32Array, 'shaping the land', progress),
+    fetchTyped('ao.bin', Uint8Array, 'settling the light', progress),
+    fetchTyped('trees.bin', Float32Array, 'growing the woods', progress),
+    fetchTyped('rocks.bin', Float32Array, 'placing stones', progress),
   ]);
   progress('waking the traveller');
-  const gltf = await new GLTFLoader().loadAsync('/assets/character.glb');
+  const gltf = await new GLTFLoader().loadAsync(asset('character.glb'));
   return { manifest, heights, ao, trees, rocks, gltf };
 }
 

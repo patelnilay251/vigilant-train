@@ -14,7 +14,7 @@ import { makeNoise2D, fbm, ridged, mulberry32 } from './lib/noise.mjs';
 import { clamp, smoothstep } from './lib/sdf.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const OUT_DIR = path.resolve(__dirname, '../web/public/assets');
+const OUT_DIR = path.resolve(__dirname, '../web/assets');
 
 const SEED = 1337;
 const WORLD_SIZE = 400;          // metres across

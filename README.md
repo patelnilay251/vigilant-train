@@ -11,6 +11,26 @@ npm install
 npm start          # build assets, then serve on http://localhost:5173
 ```
 
+## Deploying
+
+`web/` is the deployable root and the build is entirely static — no server at
+runtime. `npm run build:assets` generates the character, the world, and a copy
+of the three.js files the app imports into `web/vendor/`, after which the
+directory can be uploaded anywhere.
+
+Every path is relative and asset URLs resolve against `import.meta.url`, so the
+site works at a domain root and under a subpath (project pages, preview URLs)
+without configuration. To rehearse the subpath case locally:
+
+```bash
+BASE_PATH=vigilant-train npm run dev   # http://localhost:5173/vigilant-train/
+```
+
+A GitHub Pages workflow is included at `.github/workflows/deploy.yml`. It
+triggers on the default branch or manually, needs no secrets, and enables Pages
+itself on the first run. For Vercel or Netlify instead: build command
+`npm run build:assets`, output directory `web`, no environment variables.
+
 **Desktop:** **WASD** move, **shift** dash, **space** jump, **mouse** look
 (click to capture), **wheel** zoom, **F** detached camera, **T** advance time of
 day, **P** pause the day cycle, **M** mute.

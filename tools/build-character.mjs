@@ -18,7 +18,7 @@ import {
 } from './lib/sdf.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const OUT_DIR = path.resolve(__dirname, '../web/public/assets');
+const OUT_DIR = path.resolve(__dirname, '../web/assets');
 
 // ---------------------------------------------------------------------------
 // Palette, authored in sRGB and converted once at write time because glTF

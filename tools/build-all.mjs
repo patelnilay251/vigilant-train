@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const steps = ['build-character.mjs', 'build-world.mjs'];
+const steps = ['build-character.mjs', 'build-world.mjs', 'vendor.mjs'];
 
 for (const step of steps) {
   const result = spawnSync(process.execPath, [path.join(__dirname, step)], { stdio: 'inherit' });

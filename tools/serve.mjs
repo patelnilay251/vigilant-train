@@ -1,5 +1,7 @@
-// Zero-dependency static server. Serves the app, the baked assets, and three.js
-// straight out of node_modules so the project needs no bundler step.
+// Zero-dependency static server for local development.
+//
+// Serves web/ exactly as a static host would, so what runs here and what runs
+// on the deployed site are the same tree of files.
 
 import http from 'node:http';
 import fs from 'node:fs';
@@ -7,13 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(__dirname, '..');
-
-const MOUNTS = [
-  ['/vendor/three/', path.join(ROOT, 'node_modules/three/')],
-  ['/assets/', path.join(ROOT, 'web/public/assets/')],
-  ['/src/', path.join(ROOT, 'web/src/')],
-];
+const ROOT = path.resolve(__dirname, '../web');
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -27,26 +23,28 @@ const MIME = {
   '.svg': 'image/svg+xml',
 };
 
-function resolveRequest(urlPath) {
-  if (urlPath === '/' || urlPath === '/index.html') {
-    return path.join(ROOT, 'web/index.html');
-  }
-  for (const [prefix, dir] of MOUNTS) {
-    if (!urlPath.startsWith(prefix)) continue;
-    const relative = decodeURIComponent(urlPath.slice(prefix.length));
-    const resolved = path.resolve(dir, relative);
-    // Refuse anything that escapes the mount via ../
-    if (!resolved.startsWith(path.resolve(dir))) return null;
-    return resolved;
-  }
-  return null;
-}
+// Set BASE_PATH to rehearse hosting under a subpath, which is what GitHub
+// project pages and most preview URLs do.
+const BASE = (process.env.BASE_PATH || '').replace(/^\/?|\/?$/g, '');
 
 const server = http.createServer((req, res) => {
-  const urlPath = new URL(req.url, 'http://localhost').pathname;
-  const filePath = resolveRequest(urlPath);
+  let urlPath = new URL(req.url, 'http://localhost').pathname;
 
-  if (!filePath || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+  if (BASE) {
+    if (urlPath === `/${BASE}`) urlPath = `/${BASE}/`;
+    if (!urlPath.startsWith(`/${BASE}/`)) {
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end(`404 ${urlPath} (expected /${BASE}/…)`);
+      return;
+    }
+    urlPath = urlPath.slice(BASE.length + 1);
+  }
+
+  const relative = decodeURIComponent(urlPath === '/' ? 'index.html' : urlPath.slice(1));
+  const filePath = path.resolve(ROOT, relative);
+
+  // Refuse anything that escapes the served root via ../
+  if (!filePath.startsWith(ROOT) || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
     res.writeHead(404, { 'content-type': 'text/plain' });
     res.end(`404 ${urlPath}`);
     return;
@@ -63,5 +61,5 @@ const server = http.createServer((req, res) => {
 
 const port = Number(process.env.PORT || 5173);
 server.listen(port, () => {
-  console.log(`[serve] http://localhost:${port}`);
+  console.log(`[serve] http://localhost:${port}${BASE ? `/${BASE}/` : '/'}`);
 });
