@@ -26,10 +26,17 @@ without configuration. To rehearse the subpath case locally:
 BASE_PATH=vigilant-train npm run dev   # http://localhost:5173/vigilant-train/
 ```
 
-A GitHub Pages workflow is included at `.github/workflows/deploy.yml`. It
-triggers on the default branch or manually, needs no secrets, and enables Pages
-itself on the first run. For Vercel or Netlify instead: build command
-`npm run build:assets`, output directory `web`, no environment variables.
+The live deployment is on Vercel, configured by `vercel.json`: install with
+`--omit=dev` (Playwright is only needed for the local capture harness), build
+with `npm run build:assets`, serve `web`. The framework field is pinned to
+`null` — left to itself Vercel guesses Next.js and the build fails looking for
+it.
+
+A GitHub Pages workflow is also included at `.github/workflows/deploy.yml` as
+an alternative. It needs no secrets, but Pages has to be switched on once under
+Settings → Pages with its source set to GitHub Actions: creating a Pages site
+requires repo-admin rights that the default `GITHUB_TOKEN` does not have, so
+the workflow cannot bootstrap itself.
 
 **Desktop:** **WASD** move, **shift** dash, **space** jump, **mouse** look
 (click to capture), **wheel** zoom, **F** detached camera, **T** advance time of

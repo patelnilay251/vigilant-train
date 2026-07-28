@@ -7,3 +7,4 @@ web/vendor/
 
 # Output of `npm run shoot`.
 shots/
+.vercel
