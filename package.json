@@ -1,0 +1,22 @@
+{
+  "name": "vigilant-train",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A procedurally generated 3D open world with a synthesised, rigged character, rendered in the browser.",
+  "scripts": {
+    "build:assets": "node tools/build-all.mjs",
+    "build:character": "node tools/build-character.mjs",
+    "build:world": "node tools/build-world.mjs",
+    "dev": "node tools/serve.mjs",
+    "shoot": "node tools/shoot.mjs",
+    "start": "npm run build:assets && npm run dev"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "three": "^0.169.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.48.0"
+  }
+}

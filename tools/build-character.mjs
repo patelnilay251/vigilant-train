@@ -1,0 +1,714 @@
+// Builds the player character as a rigged, animated GLB.
+//
+// Pipeline: an implicit surface (blended SDF primitives) is meshed with surface
+// nets, painted per-vertex from a region classifier, bound to a hand-authored
+// skeleton with distance-falloff weights, and finally given animation clips
+// baked from analytic pose functions. Nothing is hand-modelled; changing a
+// number in ANATOMY below changes both the silhouette and the rig, because the
+// field and the skeleton read from the same table.
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { GLTFBuilder } from './lib/glb.mjs';
+import { surfaceNets } from './lib/surfacenets.mjs';
+import {
+  smin, sdSphere, sdEllipsoid, sdRoundCone, sdSegmentBox2D, extrudeX,
+  distanceToSegment, clamp, smoothstep,
+} from './lib/sdf.mjs';
+import { FACE_PROJECTION, SKIN, faceUV } from './lib/face-layout.mjs';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const OUT_DIR = path.resolve(__dirname, '../web/assets');
+
+// ---------------------------------------------------------------------------
+// Palette, authored in sRGB and converted once at write time because glTF
+// vertex colours are linear.
+// ---------------------------------------------------------------------------
+
+const srgbToLinear = (c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+
+// Vertex colours are multipliers against the skin rather than absolute colours:
+// the face arrives as a texture carrying absolute colour, and the two combine by
+// multiplication. Expressing the body this way means skin is plain white and
+// needs no special case, and the edge of the textured region cannot show a seam
+// because both sides resolve to the same value.
+const SKIN_LINEAR = SKIN.map(srgbToLinear);
+const asSkinMultiplier = (target) =>
+  target.map((c, i) => clamp(srgbToLinear(c) / SKIN_LINEAR[i], 0, 1));
+
+const SKIN_TONE = [1, 1, 1];
+const BROWN = asSkinMultiplier([0.451, 0.259, 0.110]);   // back stripes, tail base
+const EAR_TIP = asSkinMultiplier([0.157, 0.110, 0.078]); // near-black
+
+// ---------------------------------------------------------------------------
+// Anatomy. +Y up, +Z forward. ~1.19 units from floor to ear tip.
+//
+// Proportioned against the official 3D model rather than the anime: the head is
+// oversized and wider than it is tall, the torso is a rounded egg rather than a
+// pear, and the limbs are short and thick.
+// ---------------------------------------------------------------------------
+
+const ANATOMY = {
+  // Torso is a cone that widens to the hips, not a stack of equal spheres. The
+  // reference silhouette is a teardrop: narrow shoulders, broad bottom.
+  torsoHips: { c: [0, 0.215, 0.000], r: 0.238 },
+  torsoMid: { c: [0, 0.400, 0.008], r: 0.192 },
+  torsoTop: { c: [0, 0.520, 0.014], r: 0.152 },
+  head: { c: [0, 0.660, 0.020], r: [0.246, 0.226, 0.230] },
+  cheek: { c: [0.140, 0.598, 0.150], r: 0.092 },
+  // Long, thin and blade-like. The previous ears were nearly twice this thick
+  // and read as horns.
+  ear: {
+    root: [0.098, 0.792, -0.010],
+    mid: [0.183, 1.002, -0.062],
+    tip: [0.258, 1.212, -0.118],
+    rRoot: 0.070, rMid: 0.042, rTip: 0.014,
+  },
+  arm: { shoulder: [0.150, 0.432, 0.010], hand: [0.216, 0.312, 0.042], rTop: 0.062, rEnd: 0.053 },
+  leg: { hip: [0.096, 0.172, 0.0], ankle: [0.116, 0.042, 0.005], rTop: 0.092, rEnd: 0.078 },
+  foot: { c: [0.120, 0.038, 0.048], r: [0.080, 0.040, 0.112] },
+  // Three toes per foot, splayed across the front of the pad.
+  toes: { z: 0.132, y: 0.034, spread: 0.043, r: 0.029 },
+  fingers: { spread: 0.028, r: 0.022 },
+  /**
+   * The tail is a flat plate whose outline is a thick zigzag polyline. Built
+   * from square-cornered 2D boxes rather than round cones: the reference bolt
+   * has straight edges and sharp reversals, and capsules cannot produce either.
+   * Reaches above the crown of the head, as it does in the reference.
+   */
+  tail: {
+    // Widths are generous relative to the zigzag amplitude on purpose: too thin
+    // and consecutive segments stop overlapping, leaving a hole punched through
+    // the middle of the plate where the ribbon folds back on itself.
+    spine: [
+      [-0.150, 0.238],
+      [-0.318, 0.296],
+      [-0.222, 0.438],
+      [-0.398, 0.566],
+      [-0.252, 0.880],
+    ],
+    widths: [0.038, 0.084, 0.100, 0.114, 0.128],
+    halfThickness: 0.044,
+    cornerRadius: 0.012,
+    // Swung off the centre line, as the reference pose has it. Dead-centre the
+    // plate is edge-on from the front and its tip reads as an antenna above the
+    // head rather than as a tail behind the body.
+    yaw: 0.26,
+  },
+};
+
+const MIRROR = [1, -1];
+
+// ---------------------------------------------------------------------------
+// Shape field. Negative inside.
+// ---------------------------------------------------------------------------
+
+function tailField(x, y, z) {
+  const { spine, widths, halfThickness, cornerRadius, yaw } = ANATOMY.tail;
+
+  // Rotate into the tail's own frame about Y, so the plate can sit at an angle
+  // to the body without the outline maths having to know about it.
+  const c = Math.cos(yaw);
+  const s = Math.sin(yaw);
+  const rx = c * x - s * z;
+  const rz = s * x + c * z;
+  x = rx;
+  z = rz;
+
+  // Silhouette first, in the ZY plane.
+  let outline = Infinity;
+  for (let i = 0; i < spine.length - 1; i++) {
+    const [az, ay] = spine[i];
+    const [bz, by] = spine[i + 1];
+    // Each box carries the wider of its two endpoint widths; overlapping
+    // rectangles at each joint are what produce the bolt's sharp reversals.
+    const w = Math.max(widths[i], widths[i + 1]);
+    const box = sdSegmentBox2D(z, y, az, ay, bz, by, w);
+    // Hard union: smoothing these joints is what previously turned the
+    // lightning bolt into a featureless paddle.
+    outline = Math.min(outline, box);
+  }
+
+  return extrudeX(outline, x, halfThickness, cornerRadius);
+}
+
+function shape(x, y, z) {
+  const A = ANATOMY;
+
+  let d = smin(
+    sdSphere(x, y, z, A.torsoHips.c[0], A.torsoHips.c[1], A.torsoHips.c[2], A.torsoHips.r),
+    sdSphere(x, y, z, A.torsoMid.c[0], A.torsoMid.c[1], A.torsoMid.c[2], A.torsoMid.r),
+    0.13,
+  );
+  d = smin(d, sdSphere(x, y, z, A.torsoTop.c[0], A.torsoTop.c[1], A.torsoTop.c[2], A.torsoTop.r), 0.11);
+
+  // A tighter blend here leaves the shallow neck pinch the reference has,
+  // rather than fusing head and body into one ovoid.
+  d = smin(d, sdEllipsoid(x, y, z, A.head.c[0], A.head.c[1], A.head.c[2], A.head.r[0], A.head.r[1], A.head.r[2]), 0.05);
+
+  for (const s of MIRROR) {
+    d = smin(d, sdSphere(x, y, z, s * A.cheek.c[0], A.cheek.c[1], A.cheek.c[2], A.cheek.r), 0.055);
+
+    const e = A.ear;
+    const lower = sdRoundCone(x, y, z, s * e.root[0], e.root[1], e.root[2], s * e.mid[0], e.mid[1], e.mid[2], e.rRoot, e.rMid);
+    const upper = sdRoundCone(x, y, z, s * e.mid[0], e.mid[1], e.mid[2], s * e.tip[0], e.tip[1], e.tip[2], e.rMid, e.rTip);
+    d = smin(d, Math.min(lower, upper), 0.045);
+
+    // Arm, with a hint of separated digits on the paw.
+    const a = A.arm;
+    let limb = sdRoundCone(x, y, z, s * a.shoulder[0], a.shoulder[1], a.shoulder[2], s * a.hand[0], a.hand[1], a.hand[2], a.rTop, a.rEnd);
+    for (let f = -1; f <= 1; f++) {
+      limb = smin(limb, sdSphere(
+        x, y, z,
+        s * (a.hand[0] + f * A.fingers.spread * 0.6),
+        a.hand[1] - 0.030,
+        a.hand[2] + f * A.fingers.spread * 0.5 + 0.020,
+        A.fingers.r,
+      ), 0.030);
+    }
+    d = smin(d, limb, 0.055);
+
+    // Leg, foot pad and toes.
+    const l = A.leg;
+    const f = A.foot;
+    let foot = sdRoundCone(x, y, z, s * l.hip[0], l.hip[1], l.hip[2], s * l.ankle[0], l.ankle[1], l.ankle[2], l.rTop, l.rEnd);
+    foot = smin(foot, sdEllipsoid(x, y, z, s * f.c[0], f.c[1], f.c[2], f.r[0], f.r[1], f.r[2]), 0.045);
+    for (let t = -1; t <= 1; t++) {
+      foot = smin(foot, sdSphere(
+        x, y, z,
+        s * (f.c[0] + t * A.toes.spread),
+        A.toes.y,
+        A.toes.z - Math.abs(t) * 0.016,
+        A.toes.r,
+      ), 0.026);
+    }
+    d = smin(d, foot, 0.06);
+  }
+
+  // Small blend so the tail joins the rump cleanly without eroding its notches.
+  return smin(d, tailField(x, y, z), 0.035);
+}
+
+/**
+ * Ambient occlusion sampled straight from the distance field.
+ *
+ * Marching outwards along the normal and comparing how far the field says the
+ * surface is against how far we actually walked measures how enclosed a point
+ * is: in the open the two agree, and in a crevice the field stays small. Costs
+ * five field evaluations per vertex and gives the model contact shading that no
+ * amount of lighting tuning can, because the geometry causing it is millimetres
+ * across — under the chin, inside the ears, where the tail meets the rump.
+ */
+function ambientOcclusion(x, y, z, nx, ny, nz) {
+  let occlusion = 0;
+  let weight = 1;
+  for (let i = 0; i < 5; i++) {
+    const h = 0.012 + 0.105 * (i / 4);
+    const d = shape(x + nx * h, y + ny * h, z + nz * h);
+    occlusion += (h - d) * weight;
+    weight *= 0.92;
+  }
+  return clamp(1 - 2.4 * occlusion, 0, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Region classifier: which colour a point on the surface takes.
+// ---------------------------------------------------------------------------
+
+function surfaceColor(x, y, z) {
+  const A = ANATOMY;
+
+  for (const s of MIRROR) {
+    const e = A.ear;
+    const { distance, t } = distanceToSegment(
+      x, y, z,
+      s * e.root[0], e.root[1], e.root[2],
+      s * e.tip[0], e.tip[1], e.tip[2],
+    );
+    // Top third of the ear, matching the reference silhouette.
+    if (distance < 0.12 && t > 0.64) return EAR_TIP;
+  }
+
+  // Decide tail membership up front. A depth bound alone is not enough to keep
+  // the back stripes off it: the tail folds forward through the same band of z
+  // that the torso's back occupies, so the two regions genuinely overlap and
+  // have to be separated by the tail field itself.
+  const onTail = tailField(x, y, z) < 0.006;
+
+  if (onTail) {
+    const [az, ay] = A.tail.spine[0];
+    const [bz, by] = A.tail.spine[1];
+    // Into the tail's yawed frame, exactly as tailField does, or the stalk test
+    // is measured against the wrong axis.
+    const tz = Math.sin(A.tail.yaw) * x + Math.cos(A.tail.yaw) * z;
+    // Brown only on the short stalk where the tail leaves the body.
+    if (sdSegmentBox2D(tz, y, az, ay, bz, by, A.tail.widths[0] + 0.014) < 0.0) return BROWN;
+    return SKIN_TONE;
+  }
+
+  // Two bands across the back of the torso.
+  if (z < -0.04 && z > -0.26 && Math.abs(x) < 0.20) {
+    if ((y > 0.315 && y < 0.383) || (y > 0.429 && y < 0.491)) return BROWN;
+  }
+
+  return SKIN_TONE;
+}
+
+// ---------------------------------------------------------------------------
+// Skeleton. Rest pose is translation-only, which makes every inverse bind
+// matrix a plain negated translation.
+// ---------------------------------------------------------------------------
+
+function buildSkeleton() {
+  const A = ANATOMY;
+  const { ear, arm, leg } = A;
+  // Spine points are stored as [z, y] for the 2D outline; the rig needs xyz, in
+  // world space, which means undoing the yaw the field applies to its input.
+  const tailC = Math.cos(A.tail.yaw);
+  const tailS = Math.sin(A.tail.yaw);
+  const tail = A.tail.spine.map(([z, y]) => [tailS * z, y, tailC * z]);
+
+  const bones = [
+    { name: 'root', parent: -1, pos: [0, 0, 0] },
+    { name: 'hips', parent: 0, pos: [0, 0.215, -0.01], seg: [[0, 0.170, -0.01], [0, 0.310, 0]], r: 0.195 },
+    { name: 'spine', parent: 1, pos: [0, 0.375, 0.005], seg: [[0, 0.310, 0], [0, 0.440, 0.008]], r: 0.170 },
+    { name: 'chest', parent: 2, pos: [0, 0.500, 0.012], seg: [[0, 0.440, 0.008], [0, 0.575, 0.016]], r: 0.160 },
+    { name: 'head', parent: 3, pos: [0, 0.610, 0.018], seg: [[0, 0.600, 0.018], [0, 0.800, 0.022]], r: 0.225 },
+  ];
+
+  const index = (name) => bones.findIndex((b) => b.name === name);
+
+  for (const [suffix, s] of [['L', 1], ['R', -1]]) {
+    const m = (p) => [s * p[0], p[1], p[2]];
+    bones.push({
+      name: `ear.${suffix}`, parent: index('head'), pos: m(ear.root),
+      seg: [m(ear.root), m(ear.mid)], r: 0.085,
+    });
+    bones.push({
+      name: `earTip.${suffix}`, parent: bones.length - 1, pos: m(ear.mid),
+      seg: [m(ear.mid), m(ear.tip)], r: 0.080,
+    });
+  }
+
+  for (const [suffix, s] of [['L', 1], ['R', -1]]) {
+    const m = (p) => [s * p[0], p[1], p[2]];
+    bones.push({
+      name: `arm.${suffix}`, parent: index('chest'), pos: m(arm.shoulder),
+      seg: [m(arm.shoulder), m(arm.hand)], r: 0.085,
+    });
+    bones.push({
+      name: `hand.${suffix}`, parent: bones.length - 1, pos: m(arm.hand),
+      seg: [m(arm.hand), m(arm.hand)], r: 0.070,
+    });
+  }
+
+  for (const [suffix, s] of [['L', 1], ['R', -1]]) {
+    const m = (p) => [s * p[0], p[1], p[2]];
+    bones.push({
+      name: `leg.${suffix}`, parent: index('hips'), pos: m(leg.hip),
+      seg: [m(leg.hip), m(leg.ankle)], r: 0.100,
+    });
+    bones.push({
+      name: `foot.${suffix}`, parent: bones.length - 1, pos: m(leg.ankle),
+      seg: [m(A.foot.c), [s * A.foot.c[0], A.toes.y, A.toes.z]], r: 0.095,
+    });
+  }
+
+  // The tail bones sit close enough to the lower back that a pure distance
+  // falloff would drag the body with them; the mask fades them in behind it.
+  const tailMask = (x, y, z) => smoothstep(-0.165, -0.29, z);
+  const tailRadii = [0.075, 0.100, 0.120, 0.150];
+  for (let i = 0; i < 4; i++) {
+    bones.push({
+      name: `tail${i + 1}`,
+      parent: i === 0 ? index('hips') : bones.length - 1,
+      pos: tail[i],
+      seg: [tail[i], tail[i + 1]],
+      r: tailRadii[i],
+      mask: tailMask,
+    });
+  }
+
+  return bones;
+}
+
+const BONES = buildSkeleton();
+const BONE_INDEX = Object.fromEntries(BONES.map((b, i) => [b.name, i]));
+
+function skinWeights(x, y, z) {
+  const candidates = [];
+  for (let i = 0; i < BONES.length; i++) {
+    const bone = BONES[i];
+    if (!bone.seg) continue;
+    const [a, b] = bone.seg;
+    const { distance } = distanceToSegment(x, y, z, a[0], a[1], a[2], b[0], b[1], b[2]);
+    let w = Math.exp(-2.2 * (distance / bone.r) ** 2);
+    if (bone.mask) w *= bone.mask(x, y, z);
+    if (w > 1e-4) candidates.push([i, w]);
+  }
+
+  candidates.sort((p, q) => q[1] - p[1]);
+  const top = candidates.slice(0, 4);
+
+  if (top.length === 0) {
+    let best = BONE_INDEX.hips;
+    let bestD = Infinity;
+    for (let i = 0; i < BONES.length; i++) {
+      const bone = BONES[i];
+      if (!bone.seg) continue;
+      const [a, b] = bone.seg;
+      const { distance } = distanceToSegment(x, y, z, a[0], a[1], a[2], b[0], b[1], b[2]);
+      if (distance < bestD) { bestD = distance; best = i; }
+    }
+    return { joints: [best, 0, 0, 0], weights: [1, 0, 0, 0] };
+  }
+
+  const total = top.reduce((sum, [, w]) => sum + w, 0);
+  const joints = [0, 0, 0, 0];
+  const weights = [0, 0, 0, 0];
+  top.forEach(([i, w], k) => { joints[k] = i; weights[k] = w / total; });
+  return { joints, weights };
+}
+
+// ---------------------------------------------------------------------------
+// Mesh accumulation.
+// ---------------------------------------------------------------------------
+
+function createMesh() {
+  return { positions: [], normals: [], colors: [], uvs: [], joints: [], weights: [], indices: [] };
+}
+
+const cross = (a, b) => [
+  a[1] * b[2] - a[2] * b[1],
+  a[2] * b[0] - a[0] * b[2],
+  a[0] * b[1] - a[1] * b[0],
+];
+function normalize(v) {
+  const l = Math.hypot(v[0], v[1], v[2]);
+  return l < 1e-12 ? [0, 1, 0] : [v[0] / l, v[1] / l, v[2] / l];
+}
+
+// ---------------------------------------------------------------------------
+// Animation. Poses are analytic; keyframes are samples of them.
+// ---------------------------------------------------------------------------
+
+const TAU = Math.PI * 2;
+const mirrorEuler = ([x, y, z]) => [x, -y, -z];
+
+function applyMirrored(pose, baseName, euler) {
+  pose[`${baseName}.L`] = { euler };
+  pose[`${baseName}.R`] = { euler: mirrorEuler(euler) };
+}
+
+function idlePose(u) {
+  const p = u * TAU;
+  const breathe = Math.sin(p * 2);
+  const pose = {
+    hips: { euler: [0, 0, 0], offset: [0, 0.008 * breathe, 0] },
+    spine: { euler: [0.020 * breathe, 0, 0] },
+    chest: { euler: [0.018 * breathe, 0, 0] },
+    head: { euler: [0.030 * Math.sin(p * 2 + 0.5), 0.075 * Math.sin(p), 0] },
+  };
+  // Ears lag the head and settle late, which is what sells them as soft.
+  applyMirrored(pose, 'ear', [0.07 * Math.sin(p + 0.3), 0, -0.10 + 0.11 * Math.sin(p)]);
+  applyMirrored(pose, 'earTip', [0, 0, 0.18 * Math.sin(p + 0.95)]);
+  applyMirrored(pose, 'arm', [0.05 * Math.sin(p), 0, -0.08 + 0.05 * Math.sin(p + 0.4)]);
+  for (let i = 0; i < 4; i++) {
+    pose[`tail${i + 1}`] = { euler: [0.03 * Math.sin(p + i * 0.5), 0.12 * Math.sin(p + i * 0.6), 0] };
+  }
+  return pose;
+}
+
+function stridePose(u, { swing, armSwing, lean, bob, earBounce, tailSway }) {
+  const p = u * TAU;
+  const pose = {
+    hips: { euler: [0, 0.07 * Math.sin(p), 0], offset: [0, bob * Math.sin(p * 2), 0] },
+    spine: { euler: [lean, 0, 0] },
+    chest: { euler: [lean * 0.5, -0.06 * Math.sin(p), 0] },
+    head: { euler: [-lean * 0.9, 0.05 * Math.sin(p), 0] },
+  };
+
+  pose['leg.L'] = { euler: [-swing * Math.sin(p), 0, 0] };
+  pose['leg.R'] = { euler: [-swing * Math.sin(p + Math.PI), 0, 0] };
+  pose['foot.L'] = { euler: [0.12 + 0.3 * Math.sin(p - 0.7), 0, 0] };
+  pose['foot.R'] = { euler: [0.12 + 0.3 * Math.sin(p + Math.PI - 0.7), 0, 0] };
+
+  pose['arm.L'] = { euler: [-armSwing * Math.sin(p + Math.PI), 0, -0.14] };
+  pose['arm.R'] = { euler: [-armSwing * Math.sin(p), 0, 0.14] };
+
+  applyMirrored(pose, 'ear', [-0.10 + earBounce * Math.sin(p * 2 + 0.4), 0, -0.16]);
+  applyMirrored(pose, 'earTip', [earBounce * 1.5 * Math.sin(p * 2 + 1.1), 0, 0]);
+
+  for (let i = 0; i < 4; i++) {
+    pose[`tail${i + 1}`] = {
+      euler: [-0.05 + 0.04 * Math.sin(p * 2 + i * 0.4), tailSway * Math.sin(p + i * 0.55), 0],
+    };
+  }
+  return pose;
+}
+
+const walkPose = (u) => stridePose(u, {
+  swing: 0.60, armSwing: 0.42, lean: 0.06, bob: 0.016, earBounce: 0.10, tailSway: 0.14,
+});
+
+const runPose = (u) => stridePose(u, {
+  swing: 0.98, armSwing: 0.78, lean: 0.28, bob: 0.034, earBounce: 0.18, tailSway: 0.22,
+});
+
+function jumpPose(u) {
+  const crouch = smoothstep(0.0, 0.16, u) * (1 - smoothstep(0.16, 0.3, u));
+  const extend = smoothstep(0.18, 0.34, u) * (1 - smoothstep(0.55, 0.78, u));
+  const land = smoothstep(0.78, 0.88, u) * (1 - smoothstep(0.88, 1.0, u));
+  const tuck = smoothstep(0.34, 0.5, u) * (1 - smoothstep(0.62, 0.8, u));
+
+  const squash = crouch * 0.9 + land * 0.7;
+  const pose = {
+    hips: { euler: [0, 0, 0], offset: [0, -0.078 * squash, 0] },
+    spine: { euler: [0.28 * squash - 0.18 * extend, 0, 0] },
+    chest: { euler: [0.12 * squash - 0.10 * extend, 0, 0] },
+    head: { euler: [-0.20 * squash + 0.16 * extend, 0, 0] },
+  };
+
+  const legBend = 0.95 * squash - 0.25 * extend + 1.15 * tuck;
+  pose['leg.L'] = { euler: [legBend, 0, 0] };
+  pose['leg.R'] = { euler: [legBend, 0, 0] };
+  pose['foot.L'] = { euler: [-0.5 * legBend + 0.35 * extend, 0, 0] };
+  pose['foot.R'] = { euler: [-0.5 * legBend + 0.35 * extend, 0, 0] };
+
+  applyMirrored(pose, 'arm', [-1.5 * extend + 0.5 * squash, 0, -0.22 - 0.30 * extend]);
+  applyMirrored(pose, 'ear', [0.45 * squash - 0.55 * extend, 0, -0.14]);
+  applyMirrored(pose, 'earTip', [0.55 * squash - 0.75 * extend, 0, 0]);
+
+  for (let i = 0; i < 4; i++) {
+    pose[`tail${i + 1}`] = { euler: [-0.25 * extend + 0.20 * squash, 0.05 * Math.sin(u * TAU + i), 0] };
+  }
+  return pose;
+}
+
+/** Played on pickup: a quick bounce with the ears thrown up. */
+function cheerPose(u) {
+  const rise = smoothstep(0.0, 0.22, u) * (1 - smoothstep(0.62, 1.0, u));
+  const dip = smoothstep(0.0, 0.10, u) * (1 - smoothstep(0.10, 0.30, u));
+  const p = u * TAU;
+
+  const pose = {
+    hips: { euler: [0, 0, 0], offset: [0, 0.085 * rise - 0.045 * dip, 0] },
+    spine: { euler: [-0.16 * rise + 0.20 * dip, 0, 0] },
+    chest: { euler: [-0.10 * rise, 0, 0] },
+    head: { euler: [-0.22 * rise + 0.10 * dip, 0.10 * Math.sin(p * 2), 0] },
+  };
+  applyMirrored(pose, 'arm', [-1.9 * rise + 0.4 * dip, 0, -0.30 - 0.35 * rise]);
+  applyMirrored(pose, 'ear', [-0.35 * rise + 0.30 * dip, 0, -0.06]);
+  applyMirrored(pose, 'earTip', [-0.45 * rise, 0, 0.20 * Math.sin(p * 2)]);
+  pose['leg.L'] = { euler: [0.55 * rise + 0.7 * dip, 0, 0] };
+  pose['leg.R'] = { euler: [0.55 * rise + 0.7 * dip, 0, 0] };
+  for (let i = 0; i < 4; i++) {
+    pose[`tail${i + 1}`] = { euler: [-0.30 * rise, 0.16 * Math.sin(p * 2 + i * 0.5), 0] };
+  }
+  return pose;
+}
+
+const CLIPS = [
+  { name: 'idle', duration: 2.8, fps: 20, pose: idlePose },
+  { name: 'walk', duration: 0.85, fps: 26, pose: walkPose },
+  { name: 'run', duration: 0.52, fps: 30, pose: runPose },
+  { name: 'jump', duration: 0.95, fps: 30, pose: jumpPose, loop: false },
+  { name: 'cheer', duration: 0.80, fps: 30, pose: cheerPose, loop: false },
+];
+
+function eulerToQuat([x, y, z]) {
+  const c1 = Math.cos(x / 2), c2 = Math.cos(y / 2), c3 = Math.cos(z / 2);
+  const s1 = Math.sin(x / 2), s2 = Math.sin(y / 2), s3 = Math.sin(z / 2);
+  return [
+    s1 * c2 * c3 + c1 * s2 * s3,
+    c1 * s2 * c3 - s1 * c2 * s3,
+    c1 * c2 * s3 + s1 * s2 * c3,
+    c1 * c2 * c3 - s1 * s2 * s3,
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Build
+// ---------------------------------------------------------------------------
+
+function main() {
+  const started = Date.now();
+  // 150 samples puts the cell size around 9mm on a 1.2m character, which
+  // resolves the ear taper, toes and tail notches without spending 100k
+  // triangles on a model that is usually a few hundred pixels tall.
+  const resolution = Number(process.env.CHAR_RES || 150);
+
+  console.log(`[character] meshing implicit surface at ${resolution} samples/longest axis`);
+  const bounds = { min: [-0.40, -0.04, -0.70], max: [0.40, 1.28, 0.34] };
+  const surface = surfaceNets(shape, { ...bounds, resolution });
+  console.log(`[character] surface: ${surface.positions.length / 3} verts, ${surface.indices.length / 3} tris`);
+
+  const mesh = createMesh();
+  for (let i = 0; i < surface.positions.length; i += 3) {
+    const x = surface.positions[i];
+    const y = surface.positions[i + 1];
+    const z = surface.positions[i + 2];
+    mesh.positions.push(x, y, z);
+    mesh.normals.push(surface.normals[i], surface.normals[i + 1], surface.normals[i + 2]);
+    const c = surfaceColor(x, y, z);
+    // Floored well above zero: this is contact shading, not a lighting solution,
+    // and driving crevices to black reads as dirt.
+    const shade = 0.54 + 0.46 * ambientOcclusion(
+      x, y, z,
+      surface.normals[i], surface.normals[i + 1], surface.normals[i + 2],
+    );
+    mesh.colors.push(c[0] * shade, c[1] * shade, c[2] * shade);
+    // Anything off the face — back of the head, ears, body, tail — is sent to a
+    // corner of the texture that is plain skin, so one material covers the
+    // whole character.
+    const uv = faceUV(x, y, z, ANATOMY.head.c, ANATOMY.head.r) || FACE_PROJECTION.restUV;
+    mesh.uvs.push(uv[0], uv[1]);
+    const { joints, weights } = skinWeights(x, y, z);
+    mesh.joints.push(...joints);
+    mesh.weights.push(...weights);
+  }
+  // Spreading here would overflow the call stack at this element count.
+  for (let i = 0; i < surface.indices.length; i++) mesh.indices.push(surface.indices[i]);
+
+  const gltf = new GLTFBuilder();
+
+  const positions = new Float32Array(mesh.positions);
+  const normals = new Float32Array(mesh.normals);
+  // Already linear multipliers; no colour-space conversion here.
+  const linear = mesh.colors.map((c) => Math.round(clamp(c, 0, 1) * 255));
+  const colors4 = new Uint8Array((linear.length / 3) * 4);
+  for (let i = 0, j = 0; i < linear.length; i += 3, j += 4) {
+    colors4[j] = linear[i];
+    colors4[j + 1] = linear[i + 1];
+    colors4[j + 2] = linear[i + 2];
+    colors4[j + 3] = 255;
+  }
+  const joints = new Uint8Array(mesh.joints);
+  const weights = new Float32Array(mesh.weights);
+  const indices = new Uint32Array(mesh.indices);
+
+  const material = gltf.addMaterial({
+    name: 'character',
+    pbrMetallicRoughness: {
+      baseColorFactor: [1, 1, 1, 1],
+      metallicFactor: 0.0,
+      roughnessFactor: 0.62,
+    },
+  });
+
+  const meshIndex = gltf.addMesh({
+    name: 'character',
+    primitives: [{
+      attributes: {
+        POSITION: gltf.addVertexAccessor(positions, 'VEC3', { computeBounds: true }),
+        NORMAL: gltf.addVertexAccessor(normals, 'VEC3'),
+        COLOR_0: gltf.addVertexAccessor(colors4, 'VEC4', { normalized: true }),
+        TEXCOORD_0: gltf.addVertexAccessor(new Float32Array(mesh.uvs), 'VEC2'),
+        JOINTS_0: gltf.addVertexAccessor(joints, 'VEC4'),
+        WEIGHTS_0: gltf.addVertexAccessor(weights, 'VEC4'),
+      },
+      indices: gltf.addIndexAccessor(indices),
+      material,
+    }],
+  });
+
+  const nodeOf = BONES.map(() => 0);
+  BONES.forEach((bone, i) => {
+    const parentPos = bone.parent >= 0 ? BONES[bone.parent].pos : [0, 0, 0];
+    nodeOf[i] = gltf.addNode({
+      name: bone.name,
+      translation: [
+        bone.pos[0] - parentPos[0],
+        bone.pos[1] - parentPos[1],
+        bone.pos[2] - parentPos[2],
+      ],
+      rotation: [0, 0, 0, 1],
+    });
+  });
+  BONES.forEach((bone, i) => {
+    if (bone.parent < 0) return;
+    const parent = gltf.json.nodes[nodeOf[bone.parent]];
+    (parent.children ||= []).push(nodeOf[i]);
+  });
+
+  // Rest pose has no rotation, so the inverse bind matrix is a pure negative
+  // translation (column-major, per the glTF convention).
+  const ibm = new Float32Array(BONES.length * 16);
+  BONES.forEach((bone, i) => {
+    ibm.set([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -bone.pos[0], -bone.pos[1], -bone.pos[2], 1], i * 16);
+  });
+
+  const skin = gltf.addSkin({
+    name: 'rig',
+    joints: nodeOf,
+    skeleton: nodeOf[0],
+    inverseBindMatrices: gltf.addAccessor(ibm, 'MAT4'),
+  });
+
+  const meshNode = gltf.addNode({ name: 'characterMesh', mesh: meshIndex, skin });
+  gltf.addSceneNode(nodeOf[0]);
+  gltf.addSceneNode(meshNode);
+
+  for (const clip of CLIPS) {
+    const frameCount = Math.max(2, Math.round(clip.duration * clip.fps) + 1);
+    const times = new Float32Array(frameCount);
+    const rotationTracks = new Map();
+    const translationTracks = new Map();
+
+    for (let f = 0; f < frameCount; f++) {
+      const u = f / (frameCount - 1);
+      times[f] = u * clip.duration;
+      const pose = clip.pose(clip.loop === false ? u : u % 1);
+
+      for (const [boneName, value] of Object.entries(pose)) {
+        const boneIdx = BONE_INDEX[boneName];
+        if (boneIdx === undefined) throw new Error(`clip ${clip.name} targets unknown bone ${boneName}`);
+
+        if (value.euler) {
+          if (!rotationTracks.has(boneIdx)) rotationTracks.set(boneIdx, new Float32Array(frameCount * 4));
+          rotationTracks.get(boneIdx).set(eulerToQuat(value.euler), f * 4);
+        }
+        if (value.offset) {
+          if (!translationTracks.has(boneIdx)) translationTracks.set(boneIdx, new Float32Array(frameCount * 3));
+          const bone = BONES[boneIdx];
+          const parentPos = bone.parent >= 0 ? BONES[bone.parent].pos : [0, 0, 0];
+          translationTracks.get(boneIdx).set([
+            bone.pos[0] - parentPos[0] + value.offset[0],
+            bone.pos[1] - parentPos[1] + value.offset[1],
+            bone.pos[2] - parentPos[2] + value.offset[2],
+          ], f * 3);
+        }
+      }
+    }
+
+    const timeAccessor = gltf.addAccessor(times, 'SCALAR');
+    const samplers = [];
+    const channels = [];
+
+    for (const [boneIdx, data] of rotationTracks) {
+      samplers.push({ input: timeAccessor, output: gltf.addAccessor(data, 'VEC4'), interpolation: 'LINEAR' });
+      channels.push({ sampler: samplers.length - 1, target: { node: nodeOf[boneIdx], path: 'rotation' } });
+    }
+    for (const [boneIdx, data] of translationTracks) {
+      samplers.push({ input: timeAccessor, output: gltf.addAccessor(data, 'VEC3'), interpolation: 'LINEAR' });
+      channels.push({ sampler: samplers.length - 1, target: { node: nodeOf[boneIdx], path: 'translation' } });
+    }
+
+    gltf.addAnimation({ name: clip.name, samplers, channels });
+    console.log(`[character] clip "${clip.name}": ${frameCount} frames, ${channels.length} channels`);
+  }
+
+  fs.mkdirSync(OUT_DIR, { recursive: true });
+  const outPath = path.join(OUT_DIR, 'character.glb');
+  const glb = gltf.toGLB();
+  fs.writeFileSync(outPath, glb);
+
+  console.log(
+    `[character] wrote ${path.relative(process.cwd(), outPath)} `
+    + `(${(glb.length / 1024).toFixed(0)} KB) in ${((Date.now() - started) / 1000).toFixed(1)}s`,
+  );
+}
+
+main();

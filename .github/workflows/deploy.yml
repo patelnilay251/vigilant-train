@@ -1,0 +1,55 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main, claude/hello-3bpgwp]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # --omit=dev skips Playwright, which is only needed for the local capture
+      # harness and would otherwise pull a browser down on every run.
+      - name: Install
+        run: npm ci --omit=dev
+
+      # Generates the character, the world and the vendored three.js into web/.
+      - name: Build assets
+        run: npm run build:assets
+
+      # Pages must already be switched on for the repository, with its source
+      # set to GitHub Actions (Settings -> Pages). The `enablement: true` option
+      # cannot do it for you: creating a Pages site needs repo-admin rights, and
+      # the default GITHUB_TOKEN does not have them.
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,10 @@
+node_modules/
+
+# Build output. Assets are reproducible from the seed and three.js is copied in
+# from node_modules, so there is no reason to version either.
+web/assets/
+web/vendor/
+
+# Output of `npm run shoot`.
+shots/
+.vercel
